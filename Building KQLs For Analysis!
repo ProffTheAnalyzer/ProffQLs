@@ -4,7 +4,7 @@ New IP.
 // ========= Parameters =========
 let userUpn = "example@gmail.com";
 let suspiciousIP = "8.8.8.8";
-let lookback = 30d;
+let lookback = 90d;      // you said you prefer 90d
 let pivotWindow = 2h;
 
 // ========= Base normalize (SigninLogs only) =========
@@ -16,7 +16,21 @@ SigninLogs
     State    = tostring(LocationDetails.state),
     City     = tostring(LocationDetails.city),
     DeviceId = tostring(DeviceDetail.deviceId),
-    DeviceName = tostring(DeviceDetail.displayName);
+    DeviceName = tostring(DeviceDetail.displayName),
+    TrustType = tostring(DeviceDetail.trustType),
+    IsCompliant = tobool(DeviceDetail.isCompliant),
+    IsManaged   = tobool(DeviceDetail.isManaged)
+| extend
+    // Simplify join state for quick triage
+    JoinState = case(
+        TrustType has "Hybrid", "Hybrid Azure AD joined",
+        TrustType has "Azure AD joined", "Azure AD joined",
+        TrustType has "Azure AD registered", "Azure AD registered",
+        isempty(TrustType), "Unknown",
+        TrustType
+    ),
+    IsHybridAzureADJoined = iif(TrustType has "Hybrid", true, false),
+    IsAzureADJoinedOrRegistered = iif(TrustType has "Azure AD joined" or TrustType has "Azure AD registered", true, false);
 
 // 1) All sign-ins for THIS user + THIS IP
 let userIpEvents =
@@ -25,7 +39,9 @@ base
 | where IPAddress == suspiciousIP
 | project TimeGenerated, UserPrincipalName, AppDisplayName, IPAddress,
           Country, State, City, ClientAppUsed, ConditionalAccessStatus,
-          ResultType, ResultDescription, DeviceName, DeviceId, UserAgent, CorrelationId;
+          ResultType, ResultDescription,
+          DeviceName, DeviceId, JoinState, TrustType, IsCompliant, IsManaged, IsAzureADJoinedOrRegistered, IsHybridAzureADJoined,
+          UserAgent, CorrelationId;
 
 // 2) Summary: first/last + counts for this user/IP
 let userIpFirstLast =
@@ -55,55 +71,20 @@ base
     userIpEvents
     | project EventTime=TimeGenerated, UserPrincipalName
 ) on UserPrincipalName
-| where abs(datetime_diff("second", TimeGenerated, EventTime)) <= tolong(pivotWindow / 1s)
+// Use between() for reliability
+| where TimeGenerated between (EventTime - pivotWindow .. EventTime + pivotWindow)
 | project AroundTime=TimeGenerated, EventTime, UserPrincipalName,
           AppDisplayName, IPAddress, Country, State, City,
-          ClientAppUsed, ConditionalAccessStatus, ResultType, ResultDescription, UserAgent;
+          ClientAppUsed, ConditionalAccessStatus, ResultType, ResultDescription,
+          DeviceName, DeviceId, JoinState, TrustType, IsCompliant, IsManaged, IsAzureADJoinedOrRegistered, IsHybridAzureADJoined,
+          UserAgent, CorrelationId;
 
 // ========= Single output table (Sections) =========
 union
 (
     userIpFirstLast
     | extend Section="Summary: User+IP", UserPrincipalName=userUpn, IPAddress=suspiciousIP
-    | project Section, TimeGenerated=LastSeen, UserPrincipalName, IPAddress,
-              AppDisplayName="", ResultType=long(null), ResultDescription="",
-              ConditionalAccessStatus="", Country="", State="", City="",
-              DeviceName="", DeviceId="", UserAgent="", CorrelationId="",
-              Metric1=strcat("FirstSeen=", tostring(FirstSeen)),
-              Metric2=strcat("LastSeen=", tostring(LastSeen)),
-              Metric3=strcat("Attempts=", tostring(Attempts), " Successes=", tostring(Successes), " Failures=", tostring(Failures))
-),
-(
-    ipAcrossUsers
-    | extend Section="Summary: IP across users", UserPrincipalName="", IPAddress=suspiciousIP
-    | project Section, TimeGenerated=now(), UserPrincipalName, IPAddress,
-              AppDisplayName="", ResultType=long(null), ResultDescription="",
-              ConditionalAccessStatus="", Country="", State="", City="",
-              DeviceName="", DeviceId="", UserAgent="", CorrelationId="",
-              Metric1=strcat("Users=", tostring(Users)),
-              Metric2=strcat("Total=", tostring(Total), " Successes=", tostring(Successes), " Failures=", tostring(Failures)),
-              Metric3=strcat("SampleUsers=", tostring(SampleUsers))
-),
-(
-    userIpEvents
-    | extend Section="Events: User+IP"
-    | project Section, TimeGenerated, UserPrincipalName, IPAddress,
-              AppDisplayName, ResultType, ResultDescription,
-              ConditionalAccessStatus, Country, State, City,
-              DeviceName, DeviceId, UserAgent, CorrelationId,
-              Metric1="", Metric2="", Metric3=""
-),
-(
-    userAround
-    | extend Section="Pivot: User around event"
-    | project Section, TimeGenerated=AroundTime, UserPrincipalName, IPAddress,
-              AppDisplayName, ResultType, ResultDescription,
-              ConditionalAccessStatus, Country, State, City,
-              DeviceName="", DeviceId="", UserAgent, CorrelationId="",
-              Metric1=strcat("EventTime=", tostring(EventTime)),
-              Metric2="", Metric3=""
-)
-| order by Section asc, TimeGenerated desc
+
 
 
 
