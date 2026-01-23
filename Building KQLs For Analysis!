@@ -27,9 +27,7 @@ SigninLogs
         TrustType has "Azure AD registered", "Azure AD registered",
         isempty(TrustType), "Unknown",
         TrustType
-    ),
-    IsHybridAzureADJoined = iif(TrustType has "Hybrid", true, false),
-    IsAzureADJoinedOrRegistered = iif(TrustType has "Azure AD joined" or TrustType has "Azure AD registered", true, false);
+    );
 
 // 1) All sign-ins for THIS user + THIS IP
 let userIpEvents =
@@ -40,7 +38,6 @@ base
           Country, State, City, ClientAppUsed, ConditionalAccessStatus,
           ResultType, ResultDescription,
           DeviceName, DeviceId, JoinState, TrustType, IsCompliant, IsManaged,
-          IsAzureADJoinedOrRegistered, IsHybridAzureADJoined,
           UserAgent, CorrelationId;
 
 // 2) Summary: first/last + counts for this user/IP
@@ -72,39 +69,26 @@ base
     | project EventTime=TimeGenerated, UserPrincipalName
 ) on UserPrincipalName
 | where TimeGenerated between (EventTime - pivotWindow .. EventTime + pivotWindow)
-| project AroundTime=TimeGenerated, EventTime, UserPrincipalName,
+| project TimeGenerated, EventTime, UserPrincipalName,
           AppDisplayName, IPAddress, Country, State, City,
           ClientAppUsed, ConditionalAccessStatus, ResultType, ResultDescription,
           DeviceName, DeviceId, JoinState, TrustType, IsCompliant, IsManaged,
-          IsAzureADJoinedOrRegistered, IsHybridAzureADJoined,
           UserAgent, CorrelationId;
 
-// ========= Single output table (Sections) =========
+// ========= Output (Sections) =========
 union
 (
     userIpFirstLast
     | extend Section="Summary: User+IP", UserPrincipalName=userUpn, IPAddress=suspiciousIP
     | project Section, TimeGenerated=LastSeen, UserPrincipalName, IPAddress,
-              AppDisplayName="", ResultType=long(null), ResultDescription="",
-              ConditionalAccessStatus="", Country="", State="", City="",
-              DeviceName="", DeviceId="", JoinState="", TrustType="",
-              IsCompliant=tobool(null), IsManaged=tobool(null),
-              IsAzureADJoinedOrRegistered=tobool(null), IsHybridAzureADJoined=tobool(null),
-              UserAgent="", CorrelationId="",
               Metric1=strcat("FirstSeen=", tostring(FirstSeen)),
               Metric2=strcat("LastSeen=", tostring(LastSeen)),
               Metric3=strcat("Attempts=", tostring(Attempts), " Successes=", tostring(Successes), " Failures=", tostring(Failures))
 ),
 (
     ipAcrossUsers
-    | extend Section="Summary: IP across users", UserPrincipalName="", IPAddress=suspiciousIP
-    | project Section, TimeGenerated=now(), UserPrincipalName, IPAddress,
-              AppDisplayName="", ResultType=long(null), ResultDescription="",
-              ConditionalAccessStatus="", Country="", State="", City="",
-              DeviceName="", DeviceId="", JoinState="", TrustType="",
-              IsCompliant=tobool(null), IsManaged=tobool(null),
-              IsAzureADJoinedOrRegistered=tobool(null), IsHybridAzureADJoined=tobool(null),
-              UserAgent="", CorrelationId="",
+    | extend Section="Summary: IP across users", IPAddress=suspiciousIP
+    | project Section, TimeGenerated=now(), UserPrincipalName="", IPAddress,
               Metric1=strcat("Users=", tostring(Users)),
               Metric2=strcat("Total=", tostring(Total), " Successes=", tostring(Successes), " Failures=", tostring(Failures)),
               Metric3=strcat("SampleUsers=", tostring(SampleUsers))
@@ -112,27 +96,24 @@ union
 (
     userIpEvents
     | extend Section="Events: User+IP"
-    | project Section, TimeGenerated, UserPrincipalName, IPAddress,
-              AppDisplayName, ResultType, ResultDescription,
-              ConditionalAccessStatus, Country, State, City,
+    | project Section, TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName,
+              ResultType, ResultDescription, ConditionalAccessStatus,
+              Country, State, City,
               DeviceName, DeviceId, JoinState, TrustType, IsCompliant, IsManaged,
-              IsAzureADJoinedOrRegistered, IsHybridAzureADJoined,
-              UserAgent, CorrelationId,
-              Metric1="", Metric2="", Metric3=""
+              UserAgent, CorrelationId
 ),
 (
     userAround
     | extend Section="Pivot: User around event"
-    | project Section, TimeGenerated=AroundTime, UserPrincipalName, IPAddress,
-              AppDisplayName, ResultType, ResultDescription,
-              ConditionalAccessStatus, Country, State, City,
+    | project Section, TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName,
+              ResultType, ResultDescription, ConditionalAccessStatus,
+              Country, State, City,
               DeviceName, DeviceId, JoinState, TrustType, IsCompliant, IsManaged,
-              IsAzureADJoinedOrRegistered, IsHybridAzureADJoined,
               UserAgent, CorrelationId,
-              Metric1=strcat("EventTime=", tostring(EventTime)),
-              Metric2="", Metric3=""
+              Metric1=strcat("EventTime=", tostring(EventTime))
 )
 | order by Section asc, TimeGenerated desc
+
 
 
 
