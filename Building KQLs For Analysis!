@@ -314,31 +314,53 @@ All-in-one: suspicious URL click → impacted users → post-click sign-in risk 
 
 
 // ===============================
-// UrlClickEvents -> impacted users -> SigninLogs check
+// UrlClickEvents -> impacted users -> SigninLogs check (schema-safe + click-through)
 // ===============================
-let suspiciousUrl = "http://example.bad/landing";   // substring match is OK
-let clickLookback = 7d;
-let postClickWindow = 48h;
-let baselineWindow = 30d;
-let baselineBuffer = 2h;
+let suspiciousUrl    = "http://example.bad/landing"; // substring is OK
+let clickLookback    = 7d;
+let postClickWindow  = 48h;   // after first click
+let baselineWindow   = 30d;   // before first click
+let baselineBuffer   = 2h;    // exclude 2h immediately before click from baseline
 
-// ---- 1) Click events -> users who clicked ----
+// ---- 1) Click events -> users who clicked (include click-through if possible) ----
 let ClickEvents =
 UrlClickEvents
 | where TimeGenerated > ago(clickLookback)
 | extend
-    ClickUrl = tostring(Url),
-    UserUpn  = coalesce(tostring(AccountUpn), tostring(UserPrincipalName), tostring(UserId))
+    ClickUrl = tostring(column_ifexists("Url","")),
+    UserUpn  = tostring(coalesce(
+                column_ifexists("AccountUpn",""),
+                column_ifexists("UserPrincipalName",""),
+                column_ifexists("AccountName",""),
+                column_ifexists("UserId","")
+            )),
+    Action   = tostring(column_ifexists("ActionType","")),
+    Threats  = tostring(column_ifexists("ThreatTypes","")),
+    MsgId    = tostring(column_ifexists("NetworkMessageId",""))
 | where isnotempty(UserUpn)
 | where ClickUrl has suspiciousUrl
-| project ClickTime=TimeGenerated, UserUpn, ClickUrl, ActionType, ThreatTypes, NetworkMessageId;
+| extend
+    // Best-effort click-through detection:
+    // Many tenants record this in ActionType-like strings (e.g., "ClickThrough", "Allowed", etc.)
+    IsClickThrough = iif(
+        tolower(Action) has "through"
+        or tolower(Action) has "bypass"
+        or tolower(Action) has "override"
+        or tolower(Action) has "allowed",  // sometimes "allowed" implies user proceeded
+        true, false
+    )
+| project ClickTime=TimeGenerated, UserUpn, ClickUrl, Action, IsClickThrough, Threats, MsgId;
 
+// Who clicked (first/last per user + click-through counts)
 let ClickedUsers =
 ClickEvents
-| summarize ClickCount=count(),
-            FirstClick=min(ClickTime),
-            LastClick=max(ClickTime),
-            SampleUrls=make_set(ClickUrl, 5)
+| summarize
+    ClickCount=count(),
+    ClickThroughCount=countif(IsClickThrough),
+    FirstClick=min(ClickTime),
+    LastClick=max(ClickTime),
+    SampleUrls=make_set(ClickUrl, 5),
+    SampleActions=make_set(Action, 10)
   by UserUpn;
 
 // ---- 2) Baseline per user (before first click) ----
@@ -362,11 +384,11 @@ ClickedUsers
 | join kind=inner (
     SigninLogs
     | where TimeGenerated > ago(clickLookback + postClickWindow)
-    | extend Country = tostring(LocationDetails.countryOrRegion),
-             State   = tostring(LocationDetails.state),
-             City    = tostring(LocationDetails.city),
-             DeviceId = tostring(DeviceDetail.deviceId),
-             DeviceName = tostring(DeviceDetail.displayName)
+    | extend Country   = tostring(LocationDetails.countryOrRegion),
+             State     = tostring(LocationDetails.state),
+             City      = tostring(LocationDetails.city),
+             DeviceId  = tostring(DeviceDetail.deviceId),
+             DeviceName= tostring(DeviceDetail.displayName)
     | project SignInTime=TimeGenerated, UserUpn=UserPrincipalName, AppDisplayName, IPAddress,
               Country, State, City, ClientAppUsed, ConditionalAccessStatus,
               ResultType, ResultDescription, DeviceName, DeviceId, UserAgent, CorrelationId
@@ -374,15 +396,15 @@ ClickedUsers
 | where SignInTime between (FirstClick .. FirstClick + postClickWindow)
 | join kind=leftouter Baseline on UserUpn
 | extend
-    IsSuccess = (ResultType == 0),
-    IsNewIP = iff(isempty(BaselineIPs), true, IPAddress !in (BaselineIPs)),
-    IsNewCountry = iff(isempty(BaselineCountries), true, Country !in (BaselineCountries)),
-    RiskScore =
+    IsSuccess   = (ResultType == 0),
+    IsNewIP     = iff(isempty(BaselineIPs), true, IPAddress !in (BaselineIPs)),
+    IsNewCountry= iff(isempty(BaselineCountries), true, Country !in (BaselineCountries)),
+    RiskScore   =
         (iif(IsSuccess and IsNewIP, 3, 0)) +
         (iif(IsSuccess and IsNewCountry, 2, 0)) +
         (iif(IsSuccess and ConditionalAccessStatus !~ "success", 1, 0));
 
-// ---- 4) Summary + details ----
+// ---- 4) Summary + suspicious details ----
 let PerUserSummary =
 PostClickSignins
 | summarize
@@ -411,10 +433,11 @@ union
 (
   ClickedUsers
   | join kind=leftouter PerUserSummary on UserUpn
-  | extend Section="Summary (clicked users + post-click sign-in risk)"
-  | project Section, UserUpn, ClickCount, FirstClick, LastClick,
+  | extend Section="Summary (clicked users + click-through + post-click sign-in risk)"
+  | extend ClickThroughPct = round(100.0 * todouble(ClickThroughCount) / todouble(ClickCount), 2)
+  | project Section, UserUpn, ClickCount, ClickThroughCount, ClickThroughPct, FirstClick, LastClick,
             PostClickSignins, PostClickSuccess, NewIPSuccess, NewCountrySuccess, MaxRiskScore,
-            SeenCountries, SeenIPs, SeenApps, SampleUrls
+            SeenCountries, SeenIPs, SeenApps, SampleUrls, SampleActions
 ),
 (
   SuspiciousSignins
@@ -422,23 +445,3 @@ union
 )
 | order by Section asc
 
-
-
-
-let suspiciousUrl = "http://example.bad/landing";
-let clickLookback = 7d;
-
-UrlClickEvents
-| where TimeGenerated > ago(clickLookback)
-| extend
-    ClickUrl = tostring(column_ifexists("Url","")),
-    UserUpn  = tostring(coalesce(
-                column_ifexists("AccountUpn",""),
-                column_ifexists("UserPrincipalName",""),
-                column_ifexists("AccountName",""),
-                column_ifexists("UserId","")
-            ))
-| where isnotempty(UserUpn)
-| where ClickUrl has suspiciousUrl
-| project TimeGenerated, UserUpn, ClickUrl, ActionType, ThreatTypes, NetworkMessageId
-| order by TimeGenerated desc
