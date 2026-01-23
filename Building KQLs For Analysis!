@@ -312,8 +312,9 @@ print FocusUser=userUpn, FocusIP=suspiciousIP
 
 All-in-one: suspicious URL click → impacted users → post-click sign-in risk (SigninLogs)
 
+
 // ===============================
-// URL click -> impacted users -> sign-in check
+// UrlClickEvents -> impacted users -> SigninLogs check
 // ===============================
 let suspiciousUrl = "http://example.bad/landing";   // substring match is OK
 let clickLookback = 7d;
@@ -321,19 +322,17 @@ let postClickWindow = 48h;
 let baselineWindow = 30d;
 let baselineBuffer = 2h;
 
-// ---- 1) Get click events and extract users who clicked ----
+// ---- 1) Click events -> users who clicked ----
 let ClickEvents =
-union isfuzzy=true UrlClickEvents, EmailUrlInfo
+UrlClickEvents
 | where TimeGenerated > ago(clickLookback)
 | extend
-    ClickUrl = coalesce(tostring(Url), tostring(UrlChain), tostring(UrlClicked), tostring(UrlDomain)),
-    UserUpn  = coalesce(tostring(AccountUpn), tostring(UserPrincipalName), tostring(UserId),
-                       tostring(RecipientEmailAddress), tostring(Recipient), tostring(ActorUpn))
+    ClickUrl = tostring(Url),
+    UserUpn  = coalesce(tostring(AccountUpn), tostring(UserPrincipalName), tostring(UserId))
 | where isnotempty(UserUpn)
-| where tostring(ClickUrl) has suspiciousUrl
+| where ClickUrl has suspiciousUrl
 | project ClickTime=TimeGenerated, UserUpn, ClickUrl, ActionType, ThreatTypes, NetworkMessageId;
 
-// Who clicked (first/last per user)
 let ClickedUsers =
 ClickEvents
 | summarize ClickCount=count(),
@@ -342,7 +341,7 @@ ClickEvents
             SampleUrls=make_set(ClickUrl, 5)
   by UserUpn;
 
-// ---- 2) Build per-user baseline sets (before their first click) ----
+// ---- 2) Baseline per user (before first click) ----
 let Baseline =
 ClickedUsers
 | join kind=inner (
@@ -357,7 +356,7 @@ ClickedUsers
             BaselineCountries=make_set(Country, 50)
   by UserUpn;
 
-// ---- 3) Pull sign-ins AFTER click and score “unfamiliar” indicators ----
+// ---- 3) Post-click sign-ins + scoring ----
 let PostClickSignins =
 ClickedUsers
 | join kind=inner (
@@ -383,7 +382,7 @@ ClickedUsers
         (iif(IsSuccess and IsNewCountry, 2, 0)) +
         (iif(IsSuccess and ConditionalAccessStatus !~ "success", 1, 0));
 
-// ---- 4) Outputs: summary per user + suspicious sign-ins details ----
+// ---- 4) Summary + details ----
 let PerUserSummary =
 PostClickSignins
 | summarize
@@ -407,7 +406,7 @@ PostClickSignins
           DeviceName, DeviceId, UserAgent, CorrelationId, IsNewIP, IsNewCountry, RiskScore
 | order by RiskScore desc, SignInTime desc;
 
-// ---- Final output (two “sections” in one result set) ----
+// ---- Final output ----
 union
 (
   ClickedUsers
