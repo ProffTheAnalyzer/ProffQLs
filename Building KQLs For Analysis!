@@ -1,0 +1,402 @@
+Unfamiliar Sign in Properties for user: 
+New IP.
+
+// ========= Parameters =========
+let userUpn = "example@gmail.com";
+let suspiciousIP = "8.8.8.8";
+let lookback = 30d;
+let pivotWindow = 2h;
+
+// ========= Base normalize (SigninLogs only) =========
+let base =
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| extend
+    Country  = tostring(LocationDetails.countryOrRegion),
+    State    = tostring(LocationDetails.state),
+    City     = tostring(LocationDetails.city),
+    DeviceId = tostring(DeviceDetail.deviceId),
+    DeviceName = tostring(DeviceDetail.displayName);
+
+// 1) All sign-ins for THIS user + THIS IP
+let userIpEvents =
+base
+| where UserPrincipalName =~ userUpn
+| where IPAddress == suspiciousIP
+| project TimeGenerated, UserPrincipalName, AppDisplayName, IPAddress,
+          Country, State, City, ClientAppUsed, ConditionalAccessStatus,
+          ResultType, ResultDescription, DeviceName, DeviceId, UserAgent, CorrelationId;
+
+// 2) Summary: first/last + counts for this user/IP
+let userIpFirstLast =
+base
+| where UserPrincipalName =~ userUpn
+| where IPAddress == suspiciousIP
+| summarize FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated),
+            Attempts=count(),
+            Successes=countif(ResultType == 0),
+            Failures=countif(ResultType != 0);
+
+// 3) Context: is this IP hitting many users?
+let ipAcrossUsers =
+base
+| where IPAddress == suspiciousIP
+| summarize Users=dcount(UserPrincipalName),
+            Total=count(),
+            Successes=countif(ResultType == 0),
+            Failures=countif(ResultType != 0),
+            SampleUsers=make_set(UserPrincipalName, 25);
+
+// 4) Pivot: show all sign-ins for this user around each user+IP event time
+let userAround =
+base
+| where UserPrincipalName =~ userUpn
+| join kind=inner (
+    userIpEvents
+    | project EventTime=TimeGenerated, UserPrincipalName
+) on UserPrincipalName
+| where abs(datetime_diff("second", TimeGenerated, EventTime)) <= tolong(pivotWindow / 1s)
+| project AroundTime=TimeGenerated, EventTime, UserPrincipalName,
+          AppDisplayName, IPAddress, Country, State, City,
+          ClientAppUsed, ConditionalAccessStatus, ResultType, ResultDescription, UserAgent;
+
+// ========= Single output table (Sections) =========
+union
+(
+    userIpFirstLast
+    | extend Section="Summary: User+IP", UserPrincipalName=userUpn, IPAddress=suspiciousIP
+    | project Section, TimeGenerated=LastSeen, UserPrincipalName, IPAddress,
+              AppDisplayName="", ResultType=long(null), ResultDescription="",
+              ConditionalAccessStatus="", Country="", State="", City="",
+              DeviceName="", DeviceId="", UserAgent="", CorrelationId="",
+              Metric1=strcat("FirstSeen=", tostring(FirstSeen)),
+              Metric2=strcat("LastSeen=", tostring(LastSeen)),
+              Metric3=strcat("Attempts=", tostring(Attempts), " Successes=", tostring(Successes), " Failures=", tostring(Failures))
+),
+(
+    ipAcrossUsers
+    | extend Section="Summary: IP across users", UserPrincipalName="", IPAddress=suspiciousIP
+    | project Section, TimeGenerated=now(), UserPrincipalName, IPAddress,
+              AppDisplayName="", ResultType=long(null), ResultDescription="",
+              ConditionalAccessStatus="", Country="", State="", City="",
+              DeviceName="", DeviceId="", UserAgent="", CorrelationId="",
+              Metric1=strcat("Users=", tostring(Users)),
+              Metric2=strcat("Total=", tostring(Total), " Successes=", tostring(Successes), " Failures=", tostring(Failures)),
+              Metric3=strcat("SampleUsers=", tostring(SampleUsers))
+),
+(
+    userIpEvents
+    | extend Section="Events: User+IP"
+    | project Section, TimeGenerated, UserPrincipalName, IPAddress,
+              AppDisplayName, ResultType, ResultDescription,
+              ConditionalAccessStatus, Country, State, City,
+              DeviceName, DeviceId, UserAgent, CorrelationId,
+              Metric1="", Metric2="", Metric3=""
+),
+(
+    userAround
+    | extend Section="Pivot: User around event"
+    | project Section, TimeGenerated=AroundTime, UserPrincipalName, IPAddress,
+              AppDisplayName, ResultType, ResultDescription,
+              ConditionalAccessStatus, Country, State, City,
+              DeviceName="", DeviceId="", UserAgent, CorrelationId="",
+              Metric1=strcat("EventTime=", tostring(EventTime)),
+              Metric2="", Metric3=""
+)
+| order by Section asc, TimeGenerated desc
+
+
+
+
+Who in the tenant uses 8.8.8.8 (and how much)?
+
+let lookback = 90d;
+let suspectedVpnIP = "8.8.8.8";
+
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| where isnotempty(IPAddress)
+| where IPAddress == suspectedVpnIP
+| summarize
+    TotalEvents=count(),
+    Successes=countif(ResultType == 0),
+    Failures=countif(ResultType != 0),
+    Users=dcount(UserPrincipalName),
+    Apps=dcount(AppDisplayName),
+    FirstSeen=min(TimeGenerated),
+    LastSeen=max(TimeGenerated),
+    SampleUsers=make_set(UserPrincipalName, 25),
+    SampleApps=make_set(AppDisplayName, 20)
+
+
+
+
+If you want a per-user breakdown for that IP:
+
+let lookback = 90d;
+let suspectedVpnIP = "8.8.8.8";
+
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| where IPAddress == suspectedVpnIP
+| summarize
+    Total=count(),
+    Successes=countif(ResultType == 0),
+    Failures=countif(ResultType != 0),
+    FirstSeen=min(TimeGenerated),
+    LastSeen=max(TimeGenerated),
+    Apps=make_set(AppDisplayName, 15)
+  by UserPrincipalName
+| order by Total desc
+
+
+For example@gmail.com: does this user use 8.8.8.8, and how often?
+
+let userUpn = "example@gmail.com";
+let lookback = 90d;
+let suspectedVpnIP = "8.8.8.8";
+
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| where UserPrincipalName =~ userUpn
+| where isnotempty(IPAddress)
+| summarize
+    Total=count(),
+    FromSuspectedVPN=countif(IPAddress == suspectedVpnIP),
+    FromSuspectedVPNPct=round(100.0 * todouble(FromSuspectedVPN) / todouble(Total), 2),
+    Successes=countif(ResultType == 0),
+    Failures=countif(ResultType != 0),
+    FirstSeen=min(TimeGenerated),
+    LastSeen=max(TimeGenerated),
+    AppsFromSuspectedVPN=make_set_if(AppDisplayName, IPAddress == suspectedVpnIP, 20)
+
+
+This flags “likely anonymized access” by focusing on new IP + new country for that user over 90 days.
+
+let userUpn = "example@gmail.com";
+let baseline = 90d;
+let recent = 7d;
+
+let baselinePairs =
+SigninLogs
+| where TimeGenerated between (ago(baseline) .. ago(recent))
+| where UserPrincipalName =~ userUpn
+| where ResultType == 0
+| extend Country = tostring(LocationDetails.countryOrRegion)
+| summarize by IPAddress, Country;
+
+SigninLogs
+| where TimeGenerated > ago(recent)
+| where UserPrincipalName =~ userUpn
+| where ResultType == 0
+| extend Country = tostring(LocationDetails.countryOrRegion)
+| where (IPAddress, Country) !in (baselinePairs)
+| project TimeGenerated, AppDisplayName, IPAddress, Country, ClientAppUsed,
+          ConditionalAccessStatus, UserAgent, CorrelationId
+| order by TimeGenerated desc
+
+
+Add a “churn” view: how many distinct IPs/countries per day for that user:
+
+let userUpn = "example@gmail.com";
+let lookback = 30d;
+
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| where UserPrincipalName =~ userUpn
+| where ResultType == 0
+| extend Country = tostring(LocationDetails.countryOrRegion)
+| summarize DistinctIPs=dcount(IPAddress), DistinctCountries=dcount(Country), Total=count()
+  by bin(TimeGenerated, 1d)
+| order by TimeGenerated desc
+
+
+
+With Aad and IdentityLogonEvents
+
+let userUpn = "example@gmail.com";
+let suspiciousIP = "8.8.8.8";
+let lookback = 30d;
+let pivotWindow = 2h;
+
+// 1) All sign-in activity for THIS user/IP (interactive + non-interactive + service principal)
+let userIpEvents =
+union isfuzzy=true SigninLogs, AADNonInteractiveUserSignInLogs, AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(lookback)
+| where IPAddress == suspiciousIP
+| where UserPrincipalName =~ userUpn or tostring(ServicePrincipalName) =~ userUpn
+| extend
+    Country = tostring(LocationDetails.countryOrRegion),
+    State   = tostring(LocationDetails.state),
+    City    = tostring(LocationDetails.city),
+    DeviceId = tostring(DeviceDetail.deviceId),
+    DeviceName = tostring(DeviceDetail.displayName)
+| project TimeGenerated, Type, UserPrincipalName, ServicePrincipalName, AppDisplayName,
+          IPAddress, Country, State, City, ClientAppUsed, ConditionalAccessStatus,
+          ResultType, ResultDescription, DeviceName, DeviceId, UserAgent, CorrelationId
+| order by TimeGenerated desc;
+
+// 2) Has THIS user seen THIS IP before? (baseline)
+let userSeenIpBefore =
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| where UserPrincipalName =~ userUpn
+| where ResultType == 0
+| summarize Seen=count() by IPAddress
+| where IPAddress == suspiciousIP
+| summarize SeenBefore = iif(count() > 0, true, false);
+
+let userIpFirstLast =
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| where UserPrincipalName =~ userUpn
+| where IPAddress == suspiciousIP
+| summarize FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Attempts=count(),
+          Successes=countif(ResultType==0), Failures=countif(ResultType!=0);
+
+// 3) Is this IP hitting MANY users? (spray / proxy / shared NAT indicator)
+let ipAcrossUsers =
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| where IPAddress == suspiciousIP
+| summarize Users=dcount(UserPrincipalName), Total=count(),
+            Successes=countif(ResultType==0), Failures=countif(ResultType!=0),
+            SampleUsers=make_set(UserPrincipalName, 25);
+
+// 4) Tight time pivot: show all sign-ins for that user around the suspicious event times
+let eventTimes =
+userIpEvents
+| summarize Times=make_list(TimeGenerated, 50);
+
+let userAround =
+union isfuzzy=true SigninLogs, AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(lookback)
+| where UserPrincipalName =~ userUpn
+| extend
+    Country = tostring(LocationDetails.countryOrRegion),
+    State   = tostring(LocationDetails.state),
+    City    = tostring(LocationDetails.city)
+| project TimeGenerated, Type, AppDisplayName, IPAddress, Country, State, City,
+          ClientAppUsed, ConditionalAccessStatus, ResultType, ResultDescription, UserAgent;
+
+// OUTPUT: summaries + the raw events
+print FocusUser=userUpn, FocusIP=suspiciousIP
+| union (userIpFirstLast | project FocusUser=userUpn, FocusIP=suspiciousIP, FirstSeen, LastSeen, Attempts, Successes, Failures)
+| union (ipAcrossUsers   | project FocusUser=userUpn, FocusIP=suspiciousIP, Users, Total, Successes, Failures, SampleUsers)
+| union (userIpEvents    | extend FocusUser=userUpn, FocusIP=suspiciousIP)
+| union (userAround
+        | where exists (
+            userIpEvents
+            | project TimeGenerated
+            | extend start=TimeGenerated - pivotWindow, end=TimeGenerated + pivotWindow
+        )
+) 
+
+
+All-in-one: suspicious URL click → impacted users → post-click sign-in risk (SigninLogs)
+
+// ===============================
+// URL click -> impacted users -> sign-in check
+// ===============================
+let suspiciousUrl = "http://example.bad/landing";   // <-- put your URL (exact or substring)
+let clickLookback = 7d;                              // how far back to look for clicks
+let postClickWindow = 48h;                           // sign-in window after first click
+let baselineWindow = 30d;                            // baseline period prior to click
+let baselineBuffer = 2h;                             // exclude the last 2h before click from baseline
+
+// ---- 1) Get click events and extract users who clicked ----
+let ClickEvents =
+union isfuzzy=true UrlClickEvents, EmailUrlInfo
+| where TimeGenerated > ago(clickLookback)
+| extend
+    ClickUrl = coalesce(tostring(Url), tostring(UrlChain), tostring(NetworkMessageId), tostring(ThreatTypes)), // fallback if schema differs
+    UserUpn  = coalesce(tostring(AccountUpn), tostring(UserPrincipalName), tostring(UserId),
+                       tostring(RecipientEmailAddress), tostring(Recipient), tostring(ActorUpn))
+| where isnotempty(UserUpn)
+| where tostring(ClickUrl) has suspiciousUrl or tostring(Url) has suspiciousUrl
+| project ClickTime=TimeGenerated, UserUpn, ClickUrl, ActionType, ThreatTypes, NetworkMessageId;
+
+let ClickedUsers =
+ClickEvents
+| summarize ClickCount=count(), FirstClick=min(ClickTime), LastClick=max(ClickTime), SampleUrls=make_set(ClickUrl, 5)
+  by UserUpn;
+
+// ---- 2) Build per-user baseline IP + Country sets (before first click) ----
+let Baseline =
+ClickedUsers
+| join kind=inner (
+    SigninLogs
+    | where TimeGenerated > ago(baselineWindow + clickLookback)
+    | where ResultType == 0
+    | extend Country = tostring(LocationDetails.countryOrRegion)
+    | project UserUpn=UserPrincipalName, TimeGenerated, IPAddress, Country
+) on UserUpn
+| where TimeGenerated between (FirstClick - baselineWindow .. FirstClick - baselineBuffer)
+| summarize BaselineIPs=make_set(IPAddress, 200), BaselineCountries=make_set(Country, 50) by UserUpn;
+
+// ---- 3) Pull sign-ins AFTER click and score “unfamiliar” indicators ----
+let PostClickSignins =
+ClickedUsers
+| join kind=inner (
+    SigninLogs
+    | where TimeGenerated > ago(clickLookback + postClickWindow)
+    | extend Country = tostring(LocationDetails.countryOrRegion),
+             State   = tostring(LocationDetails.state),
+             City    = tostring(LocationDetails.city),
+             DeviceId = tostring(DeviceDetail.deviceId),
+             DeviceName = tostring(DeviceDetail.displayName)
+    | project SignInTime=TimeGenerated, UserUpn=UserPrincipalName, AppDisplayName, IPAddress,
+              Country, State, City, ClientAppUsed, ConditionalAccessStatus,
+              ResultType, ResultDescription, DeviceName, DeviceId, UserAgent, CorrelationId
+) on UserUpn
+| where SignInTime between (FirstClick .. FirstClick + postClickWindow)
+| join kind=leftouter Baseline on UserUpn
+| extend
+    IsSuccess = (ResultType == 0),
+    IsNewIP = iff(isempty(BaselineIPs), true, IPAddress !in (BaselineIPs)),
+    IsNewCountry = iff(isempty(BaselineCountries), true, Country !in (BaselineCountries)),
+    RiskScore =
+        (iif(IsSuccess and IsNewIP, 3, 0)) +
+        (iif(IsSuccess and IsNewCountry, 2, 0)) +
+        (iif(IsSuccess and ConditionalAccessStatus !~ "success", 1, 0));  // CA weirdness
+;
+
+// ---- 4) Outputs: summary per user + suspicious sign-ins details ----
+let PerUserSummary =
+PostClickSignins
+| summarize
+    PostClickSignins=count(),
+    PostClickSuccess=countif(IsSuccess),
+    NewIPSuccess=countif(IsSuccess and IsNewIP),
+    NewCountrySuccess=countif(IsSuccess and IsNewCountry),
+    MaxRiskScore=max(RiskScore),
+    SeenApps=make_set(AppDisplayName, 15),
+    SeenIPs=make_set(IPAddress, 15),
+    SeenCountries=make_set(Country, 15),
+    FirstPostClick=min(SignInTime),
+    LastPostClick=max(SignInTime)
+  by UserUpn;
+
+let SuspiciousSignins =
+PostClickSignins
+| where IsSuccess and (IsNewIP or IsNewCountry or RiskScore >= 3)
+| project UserUpn, SignInTime, AppDisplayName, IPAddress, Country, State, City,
+          ClientAppUsed, ConditionalAccessStatus, ResultType, ResultDescription,
+          DeviceName, DeviceId, UserAgent, CorrelationId, IsNewIP, IsNewCountry, RiskScore
+| order by RiskScore desc, SignInTime desc;
+
+// Final output (two “sections” in one result set)
+union
+(
+  ClickedUsers
+  | join kind=leftouter PerUserSummary on UserUpn
+  | extend Section="Summary (clicked users + post-click sign-in risk)"
+  | project Section, UserUpn, ClickCount, FirstClick, LastClick,
+            PostClickSignins, PostClickSuccess, NewIPSuccess, NewCountrySuccess, MaxRiskScore,
+            SeenCountries, SeenIPs, SeenApps, SampleUrls
+),
+(
+  SuspiciousSignins
+  | extend Section="Details (suspicious post-click successful sign-ins)"
+)
+| order by Section asc
