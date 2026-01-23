@@ -183,7 +183,7 @@ SigninLogs
     AppsFromSuspectedVPN=make_set_if(AppDisplayName, IPAddress == suspectedVpnIP, 20)
 
 
-This flags “likely anonymized access” by focusing on new IP + new country for that user over 90 days.
+This flags “likely anonymized access” by focusing on new IP + new country for that user over 90 days. (working)
 
 let userUpn = "example@gmail.com";
 let baseline = 90d;
@@ -308,35 +308,41 @@ print FocusUser=userUpn, FocusIP=suspiciousIP
 ) 
 
 
+
+
 All-in-one: suspicious URL click → impacted users → post-click sign-in risk (SigninLogs)
 
 // ===============================
 // URL click -> impacted users -> sign-in check
 // ===============================
-let suspiciousUrl = "http://example.bad/landing";   // <-- put your URL (exact or substring)
-let clickLookback = 7d;                              // how far back to look for clicks
-let postClickWindow = 48h;                           // sign-in window after first click
-let baselineWindow = 30d;                            // baseline period prior to click
-let baselineBuffer = 2h;                             // exclude the last 2h before click from baseline
+let suspiciousUrl = "http://example.bad/landing";   // substring match is OK
+let clickLookback = 7d;
+let postClickWindow = 48h;
+let baselineWindow = 30d;
+let baselineBuffer = 2h;
 
 // ---- 1) Get click events and extract users who clicked ----
 let ClickEvents =
 union isfuzzy=true UrlClickEvents, EmailUrlInfo
 | where TimeGenerated > ago(clickLookback)
 | extend
-    ClickUrl = coalesce(tostring(Url), tostring(UrlChain), tostring(NetworkMessageId), tostring(ThreatTypes)), // fallback if schema differs
+    ClickUrl = coalesce(tostring(Url), tostring(UrlChain), tostring(UrlClicked), tostring(UrlDomain)),
     UserUpn  = coalesce(tostring(AccountUpn), tostring(UserPrincipalName), tostring(UserId),
                        tostring(RecipientEmailAddress), tostring(Recipient), tostring(ActorUpn))
 | where isnotempty(UserUpn)
-| where tostring(ClickUrl) has suspiciousUrl or tostring(Url) has suspiciousUrl
+| where tostring(ClickUrl) has suspiciousUrl
 | project ClickTime=TimeGenerated, UserUpn, ClickUrl, ActionType, ThreatTypes, NetworkMessageId;
 
+// Who clicked (first/last per user)
 let ClickedUsers =
 ClickEvents
-| summarize ClickCount=count(), FirstClick=min(ClickTime), LastClick=max(ClickTime), SampleUrls=make_set(ClickUrl, 5)
+| summarize ClickCount=count(),
+            FirstClick=min(ClickTime),
+            LastClick=max(ClickTime),
+            SampleUrls=make_set(ClickUrl, 5)
   by UserUpn;
 
-// ---- 2) Build per-user baseline IP + Country sets (before first click) ----
+// ---- 2) Build per-user baseline sets (before their first click) ----
 let Baseline =
 ClickedUsers
 | join kind=inner (
@@ -347,7 +353,9 @@ ClickedUsers
     | project UserUpn=UserPrincipalName, TimeGenerated, IPAddress, Country
 ) on UserUpn
 | where TimeGenerated between (FirstClick - baselineWindow .. FirstClick - baselineBuffer)
-| summarize BaselineIPs=make_set(IPAddress, 200), BaselineCountries=make_set(Country, 50) by UserUpn;
+| summarize BaselineIPs=make_set(IPAddress, 200),
+            BaselineCountries=make_set(Country, 50)
+  by UserUpn;
 
 // ---- 3) Pull sign-ins AFTER click and score “unfamiliar” indicators ----
 let PostClickSignins =
@@ -373,8 +381,7 @@ ClickedUsers
     RiskScore =
         (iif(IsSuccess and IsNewIP, 3, 0)) +
         (iif(IsSuccess and IsNewCountry, 2, 0)) +
-        (iif(IsSuccess and ConditionalAccessStatus !~ "success", 1, 0));  // CA weirdness
-;
+        (iif(IsSuccess and ConditionalAccessStatus !~ "success", 1, 0));
 
 // ---- 4) Outputs: summary per user + suspicious sign-ins details ----
 let PerUserSummary =
@@ -400,7 +407,7 @@ PostClickSignins
           DeviceName, DeviceId, UserAgent, CorrelationId, IsNewIP, IsNewCountry, RiskScore
 | order by RiskScore desc, SignInTime desc;
 
-// Final output (two “sections” in one result set)
+// ---- Final output (two “sections” in one result set) ----
 union
 (
   ClickedUsers
