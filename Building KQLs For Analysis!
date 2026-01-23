@@ -313,16 +313,12 @@ print FocusUser=userUpn, FocusIP=suspiciousIP
 All-in-one: suspicious URL click → impacted users → post-click sign-in risk (SigninLogs)
 
 
-// ===============================
-// UrlClickEvents -> impacted users -> SigninLogs check (schema-safe + click-through)
-// ===============================
-let suspiciousUrl    = "http://example.bad/landing"; // substring is OK
+let suspiciousUrl    = "http://example.bad/landing";
 let clickLookback    = 7d;
-let postClickWindow  = 48h;   // after first click
-let baselineWindow   = 30d;   // before first click
-let baselineBuffer   = 2h;    // exclude 2h immediately before click from baseline
+let postClickWindow  = 48h;
+let baselineWindow   = 30d;
+let baselineBuffer   = 2h;
 
-// ---- 1) Click events -> users who clicked (include click-through if possible) ----
 let ClickEvents =
 UrlClickEvents
 | where TimeGenerated > ago(clickLookback)
@@ -334,36 +330,22 @@ UrlClickEvents
                 column_ifexists("AccountName",""),
                 column_ifexists("UserId","")
             )),
-    Action   = tostring(column_ifexists("ActionType","")),
-    Threats  = tostring(column_ifexists("ThreatTypes","")),
-    MsgId    = tostring(column_ifexists("NetworkMessageId",""))
+    Action   = tostring(column_ifexists("ActionType",""))
 | where isnotempty(UserUpn)
 | where ClickUrl has suspiciousUrl
 | extend
-    // Best-effort click-through detection:
-    // Many tenants record this in ActionType-like strings (e.g., "ClickThrough", "Allowed", etc.)
-    IsClickThrough = iif(
-        tolower(Action) has "through"
-        or tolower(Action) has "bypass"
-        or tolower(Action) has "override"
-        or tolower(Action) has "allowed",  // sometimes "allowed" implies user proceeded
-        true, false
-    )
-| project ClickTime=TimeGenerated, UserUpn, ClickUrl, Action, IsClickThrough, Threats, MsgId;
+    ActionNorm = trim(" ", tolower(Action)),
+    IsClickThrough = iif(ActionNorm has "click allowed" or (ActionNorm has "click" and ActionNorm has "allowed"), true, false)
+| project ClickTime=TimeGenerated, UserUpn, ClickUrl, Action, IsClickThrough;
 
-// Who clicked (first/last per user + click-through counts)
 let ClickedUsers =
 ClickEvents
-| summarize
-    ClickCount=count(),
-    ClickThroughCount=countif(IsClickThrough),
-    FirstClick=min(ClickTime),
-    LastClick=max(ClickTime),
-    SampleUrls=make_set(ClickUrl, 5),
-    SampleActions=make_set(Action, 10)
+| summarize ClickCount=count(),
+            ClickThroughCount=countif(IsClickThrough),
+            FirstClick=min(ClickTime),
+            LastClick=max(ClickTime)
   by UserUpn;
 
-// ---- 2) Baseline per user (before first click) ----
 let Baseline =
 ClickedUsers
 | join kind=inner (
@@ -378,70 +360,28 @@ ClickedUsers
             BaselineCountries=make_set(Country, 50)
   by UserUpn;
 
-// ---- 3) Post-click sign-ins + scoring ----
 let PostClickSignins =
 ClickedUsers
 | join kind=inner (
     SigninLogs
     | where TimeGenerated > ago(clickLookback + postClickWindow)
-    | extend Country   = tostring(LocationDetails.countryOrRegion),
-             State     = tostring(LocationDetails.state),
-             City      = tostring(LocationDetails.city),
-             DeviceId  = tostring(DeviceDetail.deviceId),
-             DeviceName= tostring(DeviceDetail.displayName)
+    | extend Country = tostring(LocationDetails.countryOrRegion)
     | project SignInTime=TimeGenerated, UserUpn=UserPrincipalName, AppDisplayName, IPAddress,
-              Country, State, City, ClientAppUsed, ConditionalAccessStatus,
-              ResultType, ResultDescription, DeviceName, DeviceId, UserAgent, CorrelationId
+              Country, ResultType, ConditionalAccessStatus, ResultDescription
 ) on UserUpn
 | where SignInTime between (FirstClick .. FirstClick + postClickWindow)
 | join kind=leftouter Baseline on UserUpn
 | extend
-    IsSuccess   = (ResultType == 0),
-    IsNewIP     = iff(isempty(BaselineIPs), true, IPAddress !in (BaselineIPs)),
-    IsNewCountry= iff(isempty(BaselineCountries), true, Country !in (BaselineCountries)),
-    RiskScore   =
+    IsSuccess = (ResultType == 0),
+    IsNewIP = iff(isempty(BaselineIPs), true, IPAddress !in (BaselineIPs)),
+    IsNewCountry = iff(isempty(BaselineCountries), true, Country !in (BaselineCountries))
+| extend
+    RiskScore =
         (iif(IsSuccess and IsNewIP, 3, 0)) +
         (iif(IsSuccess and IsNewCountry, 2, 0)) +
         (iif(IsSuccess and ConditionalAccessStatus !~ "success", 1, 0));
 
-// ---- 4) Summary + suspicious details ----
-let PerUserSummary =
 PostClickSignins
-| summarize
-    PostClickSignins=count(),
-    PostClickSuccess=countif(IsSuccess),
-    NewIPSuccess=countif(IsSuccess and IsNewIP),
-    NewCountrySuccess=countif(IsSuccess and IsNewCountry),
-    MaxRiskScore=max(RiskScore),
-    SeenApps=make_set(AppDisplayName, 15),
-    SeenIPs=make_set(IPAddress, 15),
-    SeenCountries=make_set(Country, 15),
-    FirstPostClick=min(SignInTime),
-    LastPostClick=max(SignInTime)
-  by UserUpn;
-
-let SuspiciousSignins =
-PostClickSignins
-| where IsSuccess and (IsNewIP or IsNewCountry or RiskScore >= 3)
-| project UserUpn, SignInTime, AppDisplayName, IPAddress, Country, State, City,
-          ClientAppUsed, ConditionalAccessStatus, ResultType, ResultDescription,
-          DeviceName, DeviceId, UserAgent, CorrelationId, IsNewIP, IsNewCountry, RiskScore
-| order by RiskScore desc, SignInTime desc;
-
-// ---- Final output ----
-union
-(
-  ClickedUsers
-  | join kind=leftouter PerUserSummary on UserUpn
-  | extend Section="Summary (clicked users + click-through + post-click sign-in risk)"
-  | extend ClickThroughPct = round(100.0 * todouble(ClickThroughCount) / todouble(ClickCount), 2)
-  | project Section, UserUpn, ClickCount, ClickThroughCount, ClickThroughPct, FirstClick, LastClick,
-            PostClickSignins, PostClickSuccess, NewIPSuccess, NewCountrySuccess, MaxRiskScore,
-            SeenCountries, SeenIPs, SeenApps, SampleUrls, SampleActions
-),
-(
-  SuspiciousSignins
-  | extend Section="Details (suspicious post-click successful sign-ins)"
-)
-| order by Section asc
-
+| take 20
+| project UserUpn, SignInTime, AppDisplayName, IPAddress, Country, ResultType, IsSuccess, IsNewIP, IsNewCountry, RiskScore
+| order by SignInTime desc
