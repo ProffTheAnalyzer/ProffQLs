@@ -227,85 +227,99 @@ SigninLogs
 
 
 
-With Aad and IdentityLogonEvents
+Cloud password spray from a specific IP — SigninLogs
+This shows the spray pattern from 8.8.8.8: many users, low tries per user, lots of failures (and any successes).
 
-let userUpn = "example@gmail.com";
-let suspiciousIP = "8.8.8.8";
-let lookback = 30d;
-let pivotWindow = 2h;
+let sprayIP = "8.8.8.8";
+let lookback = 24h;
+let binSize = 15m;
 
-// 1) All sign-in activity for THIS user/IP (interactive + non-interactive + service principal)
-let userIpEvents =
-union isfuzzy=true SigninLogs, AADNonInteractiveUserSignInLogs, AADServicePrincipalSignInLogs
-| where TimeGenerated > ago(lookback)
-| where IPAddress == suspiciousIP
-| where UserPrincipalName =~ userUpn or tostring(ServicePrincipalName) =~ userUpn
-| extend
-    Country = tostring(LocationDetails.countryOrRegion),
-    State   = tostring(LocationDetails.state),
-    City    = tostring(LocationDetails.city),
-    DeviceId = tostring(DeviceDetail.deviceId),
-    DeviceName = tostring(DeviceDetail.displayName)
-| project TimeGenerated, Type, UserPrincipalName, ServicePrincipalName, AppDisplayName,
-          IPAddress, Country, State, City, ClientAppUsed, ConditionalAccessStatus,
-          ResultType, ResultDescription, DeviceName, DeviceId, UserAgent, CorrelationId
-| order by TimeGenerated desc;
+// Tune
+let minAccounts = 10;
+let maxPerAccount = 3;
+let minTotalFails = 20;
 
-// 2) Has THIS user seen THIS IP before? (baseline)
-let userSeenIpBefore =
+let perAccount =
 SigninLogs
 | where TimeGenerated > ago(lookback)
-| where UserPrincipalName =~ userUpn
-| where ResultType == 0
-| summarize Seen=count() by IPAddress
-| where IPAddress == suspiciousIP
-| summarize SeenBefore = iif(count() > 0, true, false);
+| where isnotempty(UserPrincipalName) and isnotempty(IPAddress)
+| where IPAddress == sprayIP
+| summarize Attempts=count(),
+            Fails=countif(ResultType != 0),
+            Success=countif(ResultType == 0),
+            Apps=make_set(AppDisplayName, 5),
+            Clients=make_set(ClientAppUsed, 5),
+            ResultDescs=make_set(ResultDescription, 5),
+            FirstSeen=min(TimeGenerated),
+            LastSeen=max(TimeGenerated)
+  by bin(TimeGenerated, binSize), IPAddress, UserPrincipalName;
 
-let userIpFirstLast =
-SigninLogs
+perAccount
+| where Fails > 0
+| where Attempts between (1 .. maxPerAccount)
+| summarize
+    AccountsTargeted=dcount(UserPrincipalName),
+    TotalFails=sum(Fails),
+    TotalSuccess=sum(Success),
+    SampleAccounts=make_set(UserPrincipalName, 25),
+    SampleApps=make_set(tostring(Apps), 10),
+    SampleClients=make_set(tostring(Clients), 10),
+    SampleFailReasons=make_set(tostring(ResultDescs), 10),
+    FirstSeen=min(FirstSeen),
+    LastSeen=max(LastSeen)
+  by TimeGenerated, IPAddress
+| where AccountsTargeted >= minAccounts and TotalFails >= minTotalFails
+| order by AccountsTargeted desc, TotalFails desc, TimeGenerated desc
+
+
+
+On-prem style password spray from a specific IP — IdentityLogonEvents
+This detects the same pattern from 8.8.8.8, and includes failure reasons like wrong password/locked.
+
+let sprayIP = "8.8.8.8";
+let lookback = 24h;
+let binSize = 15m;
+
+// Tune
+let minAccounts = 10;
+let maxPerAccount = 3;
+let minTotalFails = 20;
+let excludeComputerAccounts = true;
+
+let perAccount =
+IdentityLogonEvents
 | where TimeGenerated > ago(lookback)
-| where UserPrincipalName =~ userUpn
-| where IPAddress == suspiciousIP
-| summarize FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Attempts=count(),
-          Successes=countif(ResultType==0), Failures=countif(ResultType!=0);
+| extend Account=tostring(AccountName),
+         SrcIP=tostring(IPAddress),
+         SrcDevice=tostring(DeviceName),
+         Reason=tostring(FailureReason),
+         Proto=tostring(Protocol),
+         Action=tostring(ActionType)
+| where SrcIP == sprayIP
+| where isnotempty(Account)
+| where excludeComputerAccounts == false or Account !endswith "$"
+| summarize Attempts=count(),
+            Fails=countif(Action has "Fail" or Reason has_any ("wrong","bad","invalid","locked")),
+            Success=countif(Action has "Success"),
+            Reasons=make_set(Reason, 5),
+            Protocols=make_set(Proto, 5),
+            FirstSeen=min(TimeGenerated),
+            LastSeen=max(TimeGenerated)
+  by bin(TimeGenerated, binSize), SrcIP, SrcDevice, Account;
 
-// 3) Is this IP hitting MANY users? (spray / proxy / shared NAT indicator)
-let ipAcrossUsers =
-SigninLogs
-| where TimeGenerated > ago(lookback)
-| where IPAddress == suspiciousIP
-| summarize Users=dcount(UserPrincipalName), Total=count(),
-            Successes=countif(ResultType==0), Failures=countif(ResultType!=0),
-            SampleUsers=make_set(UserPrincipalName, 25);
-
-// 4) Tight time pivot: show all sign-ins for that user around the suspicious event times
-let eventTimes =
-userIpEvents
-| summarize Times=make_list(TimeGenerated, 50);
-
-let userAround =
-union isfuzzy=true SigninLogs, AADNonInteractiveUserSignInLogs
-| where TimeGenerated > ago(lookback)
-| where UserPrincipalName =~ userUpn
-| extend
-    Country = tostring(LocationDetails.countryOrRegion),
-    State   = tostring(LocationDetails.state),
-    City    = tostring(LocationDetails.city)
-| project TimeGenerated, Type, AppDisplayName, IPAddress, Country, State, City,
-          ClientAppUsed, ConditionalAccessStatus, ResultType, ResultDescription, UserAgent;
-
-// OUTPUT: summaries + the raw events
-print FocusUser=userUpn, FocusIP=suspiciousIP
-| union (userIpFirstLast | project FocusUser=userUpn, FocusIP=suspiciousIP, FirstSeen, LastSeen, Attempts, Successes, Failures)
-| union (ipAcrossUsers   | project FocusUser=userUpn, FocusIP=suspiciousIP, Users, Total, Successes, Failures, SampleUsers)
-| union (userIpEvents    | extend FocusUser=userUpn, FocusIP=suspiciousIP)
-| union (userAround
-        | where exists (
-            userIpEvents
-            | project TimeGenerated
-            | extend start=TimeGenerated - pivotWindow, end=TimeGenerated + pivotWindow
-        )
-) 
-
-
+perAccount
+| where Fails > 0
+| where Attempts between (1 .. maxPerAccount)
+| summarize
+    AccountsTargeted=dcount(Account),
+    TotalFails=sum(Fails),
+    TotalSuccess=sum(Success),
+    SampleAccounts=make_set(Account, 25),
+    SampleReasons=make_set(tostring(Reasons), 10),
+    SampleProtocols=make_set(tostring(Protocols), 10),
+    FirstSeen=min(FirstSeen),
+    LastSeen=max(LastSeen)
+  by TimeGenerated, SrcIP, SrcDevice
+| where AccountsTargeted >= minAccounts and TotalFails >= minTotalFails
+| order by AccountsTargeted desc, TotalFails desc, TimeGenerated desc
 
