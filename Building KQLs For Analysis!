@@ -421,3 +421,24 @@ union
   | extend Section="Details (suspicious post-click successful sign-ins)"
 )
 | order by Section asc
+
+
+
+
+let suspiciousUrl = "http://example.bad/landing";
+let clickLookback = 7d;
+
+UrlClickEvents
+| where TimeGenerated > ago(clickLookback)
+| extend
+    ClickUrl = tostring(column_ifexists("Url","")),
+    UserUpn  = tostring(coalesce(
+                column_ifexists("AccountUpn",""),
+                column_ifexists("UserPrincipalName",""),
+                column_ifexists("AccountName",""),
+                column_ifexists("UserId","")
+            ))
+| where isnotempty(UserUpn)
+| where ClickUrl has suspiciousUrl
+| project TimeGenerated, UserUpn, ClickUrl, ActionType, ThreatTypes, NetworkMessageId
+| order by TimeGenerated desc
