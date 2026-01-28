@@ -1,0 +1,16 @@
+Great to Use Tools for Phishing Analysis & Things to know.
+
+URL shortening/URL unshortening(unshorten.it)
+Subdomain spoofing….
+homograph (characters that resemble legitimate characters in a legitimate site) = Homoglyph attack generator
+Typo squatting 
+Dnstwist (phishing domain scanner)
+Encoding - obfuscate to evade detection) base64, url encoding, html encoding (decode in terminal… echo “encodedURL” | base64 -d
+PhishTank - phish archive repository of potentially malicious urls people submit
+Pharming - malware based, dns server poisoning
+Email IOC extractor…eioc.py
+URL2PNG
+URLVoid
+Wannabrowser (simulate anywebsite), html
+URLhaus - sharing malicious URLs that are being used for malware distribution - shows if online
+Google safe browsing
