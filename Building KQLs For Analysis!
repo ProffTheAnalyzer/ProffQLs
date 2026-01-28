@@ -323,3 +323,72 @@ perAccount
 | where AccountsTargeted >= minAccounts and TotalFails >= minTotalFails
 | order by AccountsTargeted desc, TotalFails desc, TimeGenerated desc
 
+
+URL From Email check: 
+
+let userUpn = "example@gmail.com";
+let urlNeedle = "google.com";
+let lookback = 7d;
+
+UrlClickEvents
+| where TimeGenerated > ago(lookback)
+| extend
+    UserUPN = tostring(coalesce(
+        column_ifexists("AccountUpn",""),
+        column_ifexists("UserPrincipalName",""),
+        column_ifexists("AccountName",""),
+        column_ifexists("UserId","")
+    )),
+    ClickUrl = tostring(column_ifexists("Url","")),
+    Action   = tostring(column_ifexists("ActionType","")),
+    // Email correlation fields (best-effort)
+    NetworkMessageId = tostring(column_ifexists("NetworkMessageId","")),
+    InternetMessageId = tostring(column_ifexists("InternetMessageId","")),
+    EmailSubject = tostring(column_ifexists("EmailSubject","")),
+    Sender = tostring(column_ifexists("SenderFromAddress",""))
+| where UserUPN =~ userUpn
+| where ClickUrl has urlNeedle
+// "Came from email" heuristic: some mail identifier is present
+| where isnotempty(NetworkMessageId) or isnotempty(InternetMessageId) or isnotempty(EmailSubject) or isnotempty(Sender)
+| project TimeGenerated, UserUPN, ClickUrl, Action, Sender, EmailSubject, NetworkMessageId, InternetMessageId
+| order by TimeGenerated desc
+
+
+
+
+KQL Hunting Query: Potential Pass-the-Hash (PtH), searches for logon type 9 (new credentials). which is the primary inidcator of a PtH attempt using tools like mimikatz, where a local process impersonates a remote user.
+
+SecurityEvent
+| where EventID == 4624
+| where LogonType == 9 
+| where AuthenticationPackageName == "Negotiate" or AuthenticationPackageName == "Kerberos"
+| summarize SuccessCount = count() by Computer, Account, IpAddress, LogonTypeName, ProcessName
+| order by SuccessCount desc
+
+
+KQL Hunting Query: Kerberos Encryption Downgrade (PtT). Attachkers often use RC4 encrytion(0x17) for forged or passed tickets because it's easier to crack or manipulate. Modern Windows envrionments should almost exclusively use AES (0x12 or 0x3)
+
+SecurityEvent
+| where EventID == 4769 // Kerberos Service Ticket Request
+| extend TicketEncryption = tostring(parse_json(EventData).TicketEncryptionType)
+| where TicketEncryption == "0x17" // RC4-HMAC (suspicious)
+| where Status == "0x0" // Success only
+| project TimeGenerated, Computer, TargetUserName, ServiceName, TicketEncryption, IpAddress
+
+
+
+KQL: Correlating Logons with Processes (PTH)
+This query finds Logons and then "reaches out" to find the process that triggered them.
+
+let LogonEvents = SecurityEvent
+| where EventID == 4624
+| where LogonType in (9, 3) // Type 9 (NewCredentials/PtH) or Type 3 (Network)
+| project LogonTime = TimeGenerated, Computer, Account, TargetLogonId, IpAddress;
+SecurityEvent
+| where EventID == 4688 // Process Creation
+| project ProcessTime = TimeGenerated, Computer, NewProcessName, ParentProcessName, TargetLogonId
+| join kind=inner (LogonEvents) on Computer, TargetLogonId
+| where NewProcessName !endswith "\\lsass.exe" // Typical FP
+| where NewProcessName !endswith "\\VeeamGuestHelper.exe" // Example Backup FP
+| project LogonTime, Computer, Account, IpAddress, NewProcessName, ParentProcessName
+
