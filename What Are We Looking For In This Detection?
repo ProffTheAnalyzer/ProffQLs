@@ -1,0 +1,62 @@
+Detecting Pass-the-Hash attacks:
+
+After a Pass-the-Hash attack has been executed, several Windows Security events can help identify the activity. Here are some key events to look for:
+
+Event ID 4624: This event indicates a successful logon. For pass-the-hash attacks, look for Logon Type 3 (network logon) with the Authentication Package set to NTLM.
+Event ID 4648: This event shows a successful logon attempt using explicit credentials. It can help identify when an attacker uses a hash instead of a password.
+Event ID 4672: This event logs special privileges assigned to a new logon, often seen when administrative accounts are used. Event ID
+4768 and 4769: These events are related to Kerberos authentication tickets. While not directly tied to pass-the-hash, they can provide context for legitimate logons.
+
+Missing password logon: Search for Event ID 4624 where an NTLM authentication occurs without a preceding Event ID 4624 entry indicating a password-based logon using the same account. This suggests that the NTLM authentication might have been performed using stolen credentials.
+Correlating events: Use the Logon ID hexadecimal value, found in Event IDs 4624 and 4648, to correlate events associated with the same login session. This will provide a complete picture of the user’s activities, including interactive logons, service starts, and privilege changes.
+
+Excessive host access
+Unusual host access
+NTLM authentication not preceded by a password authentication - Legitimate connections typically have an interactive logon before an NTLM connection, except the Service Accounts. 
+Correlating events: Use the Logon ID hexadecimal value, found in Event IDs 4624 and 4648, to correlate events associated with the same login session
+
+https://www.nccgroup.com/research-blog/defending-your-directory-an-expert-guide-to-mitigating-pass-the-hash-attacks-in-active-directory/
+
+
+
+Defending Your Directory: Securing Active Directory Against DCSync Attacks: 
+Detecting DCSync attacks is challenging because they leverage legitimate AD replication functionality. However, there are some key indicators that can help in identifying suspicious activity:
+
+Windows Security Log Event ID 4662: An operation was performed on an object.
+
+In the Windows Security logs (C:\Windows\System32\winevt\Logs\ Security.evtx), this event indicates a request for directory replication. Specifically, watch for access rights to the following GUIDs:
+
+{1131f6aa-9c07–11d1-f79f-00c04fc2dcd2} — DS-Replication-Get-Changes
+{1131f6ad-9c07–11d1-f79f-00c04fc2dcd2} — DS-Replication-Get-Changes-All
+{89e95b76–444d-4c62–991a-0facbeda640c} — DS-Replication-Get-Changes-In-Filtered-Set extended right
+The before mentioned strings can be found on the properties of the event 4662.
+
+
+
+How can you detect a Pass the Ticket attack?: 
+Detection of a Pass the Ticket attack can be difficult. The legitimate appearance of ticket-based activities complicates the task.
+
+The following detection strategies can help you detect this type of attack:
+
+Anomaly detection. Monitor for unusual access patterns or activities during odd hours. Such patterns might indicate malicious intent.
+Monitor authentication events. Audit all Kerberos authentication events and review them for discrepancies. Perform this auditing on both endpoints and domain controllers.
+Ticket lifespan. Track the age of tickets and set alerts for tickets that are used beyond their set lifespan.
+Monitoring tools. Use advanced threat detection solutions that can recognize Pass the Ticket attack patterns. Also watch for use of tools like Mimikatz, Kekeo, Rubeus, and Creddump7.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
