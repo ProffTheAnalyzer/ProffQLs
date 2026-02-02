@@ -392,3 +392,121 @@ SecurityEvent
 | where NewProcessName !endswith "\\VeeamGuestHelper.exe" // Example Backup FP
 | project LogonTime, Computer, Account, IpAddress, NewProcessName, ParentProcessName
 
+
+Impossible Travel: 
+
+let maxSpeed = 1000;
+SigninLogs
+| where ResultType == "0"
+| extend latitude_ = todouble(parse_json(tostring(LocationDetails.geoCoordinates)).latitude)
+| extend longitude_ = todouble(parse_json(tostring(LocationDetails.geoCoordinates)).longitude)
+| extend countryOrRegion = tostring(LocationDetails.countryOrRegion)
+| extend state = tostring(LocationDetails.state)
+| extend location = strcat(state,' - ', countryOrRegion)
+| where location <> ' - '
+| extend browser = tostring(DeviceDetail.browser)
+| summarize Count=count(),IP=any(IPAddress),Last=max(TimeGenerated) by UserDisplayName, latitude_, longitude_, Locations=tostring(location), browser,AppDisplayName, UserPrincipalName, Location
+| extend coordinates = pack_array(latitude_,longitude_)
+| summarize coordinates=any(coordinates),StateCountries=makeset(Locations),Last=max(Last),IP=any(IP),Apps=makeset(AppDisplayName),Browsers=makeset(browser), Locations=makeset(Locations) by UserDisplayName, UserPrincipalName, Location
+| summarize Coordinates=makeset(coordinates),NumberOfCountries=dcount(Location) ,StateCountries=makeset(Locations),Timestamps=makeset(Last),IPs=makeset(IP),Apps=makeset(Apps),Browsers=makeset(Browsers) by UserDisplayName, UserPrincipalName
+| where NumberOfCountries > 1
+| extend distance = round(geo_distance_2points(todouble(Coordinates[1]),todouble(Coordinates[0]),todouble(Coordinates[3]),todouble(Coordinates[2]))/1000,0)
+| extend hours = abs(datetime_diff('hour', todatetime(Timestamps[1]),todatetime(Timestamps[0])))
+| where hours > 0
+| extend speedKmPerHour = round(distance/hours,0)
+| where speedKmPerHour > maxSpeed
+| project-reorder Timestamps, UserDisplayName, UserPrincipalName, IPs, speedKmPerHour, distance, hours, StateCountries, Apps, Browsers, StateCountries
+| sort by UserPrincipalName asc
+| extend IPs = replace('[\\[|\\|\\\\|"\\]]','',tostring(IPs))
+
+
+SigninLogs
+| summarize FirstLogin = min(TimeGenerated), LastLogin = max(TimeGenerated) 
+    by UserPrincipalName, Country
+| join kind=inner (
+    SigninLogs
+    | summarize CountryCount = dcount(Country) by UserPrincipalName, bin(TimeGenerated, 1h)
+) on UserPrincipalName
+| where CountryCount > 1
+
+let TargetUser = "user@example.com"; // Replace with the specific user
+let TimeThreshold = 1h;
+SigninLogs
+| where UserPrincipalName =~ TargetUser
+| where ResultType == 0 // Successful logins only
+| where isnotempty(Location) and isnotempty(IPAddress)
+| project TimeGenerated, UserPrincipalName, Location, IPAddress
+| sort by UserPrincipalName asc, TimeGenerated asc
+| serialize
+| extend nextTime = next(TimeGenerated), nextLocation = next(Location)
+| extend diff = datetime_diff('minute', nextTime, TimeGenerated)
+// Filter for logins within 1 hour of each other from different locations
+| where Location != nextLocation
+| where diff < 60 and diff >= 0
+| project UserPrincipalName, TimeGenerated, Location, nextTime, nextLocation, diff
+
+
+let TargetUser = "Example.com"; // Adjust user identifier if necessary
+let IP1 = "12.5.8.3";
+let IP2 = "3.8.2.2";
+SigninLogs
+| where UserPrincipalName == TargetUser or Account == TargetUser
+| where IPAddress in (IP1, IP2)
+| where ResultType == 0 // Only successful sign-ins
+| sort by TimeGenerated desc
+// Calculate time difference between consecutive logins
+| serialize
+| extend NextTime = next(TimeGenerated), NextIP = next(IPAddress)
+| where IPAddress != NextIP
+| extend TimeDelta = datetime_diff('minute', TimeGenerated, NextTime)
+// Filter for a reasonable threshold (e.g., impossible if < 60 mins between IPs)
+| where TimeDelta < 60 and TimeDelta > -60
+| project TimeGenerated, UserPrincipalName, IPAddress, Location, AppDisplayName, NextTime, NextIP, TimeDelta
+
+let userUpn = "example@gmail.com";
+let lookback = 14d;
+let minGap = 5m;
+let maxGap = 1d;
+let maxSpeedKmh = 900.0;
+let earthRadiusKm = 6371.0;
+
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| where UserPrincipalName =~ userUpn
+| where ResultType == 0
+| extend
+    lat = todouble(tostring(LocationDetails.geoCoordinates.latitude)),
+    lon = todouble(tostring(LocationDetails.geoCoordinates.longitude)),
+    Country = tostring(LocationDetails.countryOrRegion),
+    City = tostring(LocationDetails.city)
+| where isnotnull(lat) and isnotnull(lon)
+| sort by TimeGenerated asc
+| serialize
+| extend
+    prevTime = prev(TimeGenerated),
+    prevIP = prev(IPAddress),
+    prevLat = prev(lat),
+    prevLon = prev(lon),
+    prevCountry = prev(Country),
+    prevCity = prev(City)
+| extend dt = TimeGenerated - prevTime
+| where dt between (minGap .. maxGap)
+// Haversine distance (km)
+| extend
+    dLat = (lat - prevLat) * pi() / 180.0,
+    dLon = (lon - prevLon) * pi() / 180.0,
+    a = pow(sin(dLat / 2.0), 2.0) + cos(prevLat * pi() / 180.0) * cos(lat * pi() / 180.0) * pow(sin(dLon / 2.0), 2.0),
+    distKm = 2.0 * earthRadiusKm * asin(sqrt(a)),
+    speedKmh = distKm / (dt / 1h)
+| where speedKmh > maxSpeedKmh and distKm > 300.0
+| project
+    UserPrincipalName=userUpn,
+    PrevTime=prevTime, TimeGenerated,
+    PrevIP=prevIP, IPAddress,
+    PrevCountry=prevCountry, Country,
+    PrevCity=prevCity, City,
+    distKm, speedKmh, dt,
+    AppDisplayName, ClientAppUsed, ConditionalAccessStatus, UserAgent, CorrelationId
+| order by speedKmh desc
+
+
