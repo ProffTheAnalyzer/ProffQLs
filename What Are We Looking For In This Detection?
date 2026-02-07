@@ -44,9 +44,86 @@ Ticket lifespan. Track the age of tickets and set alerts for tickets that are us
 Monitoring tools. Use advanced threat detection solutions that can recognize Pass the Ticket attack patterns. Also watch for use of tools like Mimikatz, Kekeo, Rubeus, and Creddump7.
 
 
+Useful EventIDs | Authentication & account abuse (Security log)
+These are your bread-and-butter for brute force, spray, suspicious logons, lateral movement.
+4624 — Successful logon (look at LogonType, source IP/workstation, auth package)
+4625 — Failed logon (wrong password, disabled, locked, etc.)
+4634 / 4647 — Logoff / user initiated logoff (session timelines)
+4648 — Logon with explicit credentials (often used by tools / “runas” / lateral attempts)
+4672 — Special privileges assigned (admin-level logon indicator)
+4776 — NTLM authentication attempt (great for NTLM spray/brute force patterns)
+4768 — Kerberos TGT requested (AS-REQ; great for initial auth patterns)
+4769 — Kerberos service ticket requested (TGS; lateral movement + service access)
+4771 — Kerberos pre-auth failed (bad password / time skew / spray hints)
+4778 / 4779 — RDP session reconnect/disconnect (RDP investigations)
+
+LogonType quick hints (4624/4625):
+2 = interactive console
+3 = network (SMB/LDAP/etc.)
+10 = RDP
+7 = unlock
+(These are huge in triage.)
+
+Privilege escalation & suspicious rights use
+4673 / 4674 — Privileged service called / sensitive privilege use (can catch rare privilege abuse)
+4688 — Process creation (if enabled; command line logging matters a lot)
+4697 — Service installed (persistence / lateral movement)
+7045 (System log, not Security) — Service installed (often more consistently collected than 4697)
+
+Account management (Security log)
+Great for detecting account takeover, persistence, and admin abuse.
+4720 — User created
+4722 — User enabled
+4723 / 4724 — Password change attempt / password reset
+4725 — User disabled
+4726 — User deleted
+4738 — User account changed (watch for odd attribute changes)
+4740 — Account locked out (spray/brute force indicator)
+4767 — User unlocked
+4728 / 4729 — Added/removed from global group
+4732 / 4733 — Added/removed from local group
+4756 / 4757 — Added/removed from universal group
 
 
+AD / Domain Controller “must-know” (Security log on DCs)
+4662 — Directory Service access (very powerful for AD object access if you have SACLs set; used for AD enumeration detections)
+5136 / 5137 / 5139 / 5141 — AD object modified/created/moved/deleted (needs proper auditing; very useful for “what changed?”)
+4719 — Audit policy changed (defense evasion / attacker tampering)
+1102 — Security log cleared (big red flag)
+4616 — System time changed (Kerberos weirdness / evasion)
+Lateral movement & remote execution
+5140 — Network share accessed (SMB activity; use with source IP and share name)
+5145 — Detailed file share access (if enabled; extremely useful but noisy)
+4698 / 4699 / 4702 — Scheduled task created/deleted/updated (persistence)
+4688 + 4648 combo — common in real-world remote tool usage (PSExec/WMI/etc.)
 
+
+PowerShell visibility (Windows PowerShell logs)
+If you can get these, they’re hunting gold:
+4104 — Script block logging (best single PS event)
+4103 — Module logging (noisy but useful)
+400 / 403 — Engine start/stop (session boundaries)
+
+Defender / AV (Microsoft-Windows-Windows Defender/Operational)
+Highly valuable if you collect it:
+1116 — Malware detected
+1117 — Malware action taken
+5007 — Defender config changed (can be attacker tampering)
+
+Sysmon (if you have it)
+Not “Windows Security log,” but often the best hunting telemetry:
+1 — Process creation (full command line + hashes)
+3 — Network connection
+7 — Image loaded (DLL loads)
+10 — Process access (LSASS access patterns)
+11 — File create
+12/13/14 — Registry create/set/value
+22 — DNS query
+
+
+“Top 12” if you want a minimal core set
+If you’re building a fast cheat-sheet:
+4624, 4625, 4688, 4697/7045, 4720, 4724, 4728/4732, 4740, 4768, 4769, 4776, 1102
 
 
 
