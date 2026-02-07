@@ -125,7 +125,7 @@ Not “Windows Security log,” but often the best hunting telemetry:
 If you’re building a fast cheat-sheet:
 4624, 4625, 4688, 4697/7045, 4720, 4724, 4728/4732, 4740, 4768, 4769, 4776, 1102
 
-
+Named Pipe EventID: 17, 18
 
 
 
