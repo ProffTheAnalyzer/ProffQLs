@@ -1,5 +1,23 @@
 Sign in....
 
+Impossible Travel: 
+
+SigninLogs
+| where UserPrincipalName =~ "user@yourdomain.com" // <--- Enter the user here
+| where ResultType == 0 // Successful logins only
+| extend City = tostring(LocationDetails.city), Country = tostring(LocationDetails.countryOrRegion)
+| extend Lat = toreal(LocationDetails.geoCoordinates.latitude), Lon = toreal(LocationDetails.geoCoordinates.longitude)
+| sort by TimeGenerated asc 
+// Look at the previous login for this specific user
+| extend prevLat = prev(Lat), prevLon = prev(Lon), prevTime = prev(TimeGenerated), prevLocation = prev(City)
+// Calculate distance and speed
+| extend DistanceKm = geo_distance_2points(Lon, Lat, prevLon, prevLat) / 1000
+| extend TimeDiffMinutes = datetime_diff('minute', TimeGenerated, prevTime)
+| extend SpeedKph = iif(TimeDiffMinutes > 0, (DistanceKm / (todouble(TimeDiffMinutes) / 60)), 0.0)
+// Filter for "Impossible" speeds
+| where SpeedKph > 800 and DistanceKm > 50
+| project TimeGenerated, prevTime, prevLocation, CurrentLocation = City, DistanceKm, TimeDiffMinutes, SpeedKph, IPAddress, AppDisplayName
+
 
 Who in the tenant uses 8.8.8.8 (and how much)? (working)
 
