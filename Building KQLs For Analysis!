@@ -452,3 +452,20 @@ DeviceProcessEvents
 | where ipv4_is_private(RemoteIP) == false
 | project TaskCreationTime, NetworkTime, DeviceName, AccountName, RemoteIP, RemoteUrl, ProcessCommandLine
 
+
+Lateral Movement (Admin)
+
+DeviceLogonEvents
+| where AccountName has "admin" 
+| where ActionType == "LogonSuccess"
+| where IsLocalAdmin == true // Boolean check (no quotes)
+| project LogonTime = Timestamp, AccountName, DeviceName, DeviceId
+| join kind=inner (
+    DeviceProcessEvents
+    | where FileName has_any ("powershell.exe", "cmd.exe")
+    | project ExecutionTime = Timestamp, AccountName, DeviceName, DeviceId, FileName, ProcessCommandLine
+) on AccountName, DeviceId // Join on BOTH user and machine
+| where ExecutionTime between (LogonTime .. (LogonTime + 30m)) // The "Immediately" part
+| project LogonTime, ExecutionTime, DeviceName, AccountName, FileName, ProcessCommandLine
+
+
