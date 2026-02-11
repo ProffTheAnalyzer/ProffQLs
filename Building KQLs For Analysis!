@@ -469,3 +469,19 @@ DeviceLogonEvents
 | project LogonTime, ExecutionTime, DeviceName, AccountName, FileName, ProcessCommandLine
 
 
+Where commandline is encoded: 
+
+DeviceLogonEvents
+| where IsLocalAdmin == true 
+| project LogonTime = Timestamp, AccountName, DeviceId
+| join kind=inner (
+    DeviceProcessEvents
+    | where FileName =~ "powershell.exe"
+    // Search for common "Encoded" flags in the command line
+    | where ProcessCommandLine has_any ("-enc", "-EncodedCommand", "-e ", "/e ")
+    | project ExecutionTime = Timestamp, AccountName, DeviceId, ProcessCommandLine
+) on AccountName, DeviceId
+| where ExecutionTime between (LogonTime .. (LogonTime + 1h))
+| project ExecutionTime, AccountName, DeviceId, ProcessCommandLine
+
+
