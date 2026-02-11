@@ -23,7 +23,6 @@ SigninLogs
 
 
 
-
 If you want a per-user breakdown for that IP: (Working)
 
 let lookback = 90d;
@@ -383,4 +382,55 @@ SigninLogs
     AppDisplayName, ClientAppUsed, ConditionalAccessStatus, UserAgent, CorrelationId
 | order by speedKmh desc
 
+
+DeviceFile Activities: 
+
+This query finds devices that have the file on the disk and shows exactly when they last ran it.
+
+DeviceFileEvents
+| where FileName =~ "example.exe"
+| project DeviceId, DeviceName, FilePath = FolderPath, last_seen_on_disk = Timestamp
+| join kind=inner (
+    DeviceProcessEvents
+    | where FileName =~ "example.exe"
+    | project DeviceId, last_executed = Timestamp, ProcessCommandLine
+) on DeviceId
+| summarize 
+    LastTimeSeenOnDisk = max(last_seen_on_disk), 
+    LastTimeExecuted = max(last_executed) 
+    by DeviceId, DeviceName, FilePath, ProcessCommandLine
+
+
+KQL Query: Hunting for Renamed Executables 
+We join the DeviceFileEvents (where the rename happens) with DeviceProcessEvents (where it eventually runs)
+
+DeviceFileEvents
+| where ActionType == "FileRenamed"
+| where FileName =~ "example.exe" // The NEW name
+| project RenameTime = Timestamp, DeviceId, NewName = FileName, OriginalName = PreviousFileName, FolderPath
+| join kind=inner (
+    DeviceProcessEvents
+    | where FileName =~ "example.exe"
+    | project ExecutionTime = Timestamp, DeviceId, ProcessCommandLine, AccountName
+) on DeviceId
+| where ExecutionTime > RenameTime // Ensure it ran AFTER it was renamed
+| project RenameTime, ExecutionTime, DeviceId, OriginalName, NewName, ProcessCommandLine, AccountName
+
+
+This version removes private IPs and common "System" accounts to show you only the unusual activity.
+
+DeviceProcessEvents
+| where FileName =~ "schtasks.exe"
+// 1. Filter out the noise: only look for User accounts or suspicious processes
+| where AccountName !in~ ("system", "local service", "network service")
+| project TaskCreationTime = Timestamp, DeviceId, DeviceName, ProcessCommandLine, AccountName, ProcessId
+| join kind=inner (
+    DeviceNetworkEvents
+    | project NetworkTime = Timestamp, DeviceId, RemoteIP, RemoteUrl, InitiatingProcessId
+) on DeviceId
+// 2. The "Time Window" - happened within 5 minutes of each other
+| where NetworkTime between (TaskCreationTime .. (TaskCreationTime + 5m))
+// 3. The "Internal Filter" - only show connections to the INTERNET
+| where ipv4_is_private(RemoteIP) == false
+| project TaskCreationTime, NetworkTime, DeviceName, AccountName, RemoteIP, RemoteUrl, ProcessCommandLine
 
