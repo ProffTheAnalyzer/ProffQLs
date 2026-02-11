@@ -1,123 +1,4 @@
-Unfamiliar Sign in Properties for user: 
-New IP.
-
-Working. 
-
-// ========= Parameters =========
-let userUpn = "example@gmail.com";
-let suspiciousIP = "8.8.8.8";
-let lookback = 90d;
-let pivotWindow = 2h;
-
-// ========= Base normalize (SigninLogs only) =========
-let base =
-SigninLogs
-| where TimeGenerated > ago(lookback)
-| extend
-    Country  = tostring(LocationDetails.countryOrRegion),
-    State    = tostring(LocationDetails.state),
-    City     = tostring(LocationDetails.city),
-    DeviceId = tostring(DeviceDetail.deviceId),
-    DeviceName = tostring(DeviceDetail.displayName),
-    TrustType = tostring(DeviceDetail.trustType),
-    IsCompliant = tobool(DeviceDetail.isCompliant),
-    IsManaged   = tobool(DeviceDetail.isManaged)
-| extend
-    JoinState = case(
-        TrustType has "Hybrid", "Hybrid Azure AD joined",
-        TrustType has "Azure AD joined", "Azure AD joined",
-        TrustType has "Azure AD registered", "Azure AD registered",
-        isempty(TrustType), "Unknown",
-        TrustType
-    );
-
-// 1) All sign-ins for THIS user + THIS IP
-let userIpEvents =
-base
-| where UserPrincipalName =~ userUpn
-| where IPAddress == suspiciousIP
-| project TimeGenerated, UserPrincipalName, AppDisplayName, IPAddress,
-          Country, State, City, ClientAppUsed, ConditionalAccessStatus,
-          ResultType, ResultDescription,
-          DeviceName, DeviceId, JoinState, TrustType, IsCompliant, IsManaged,
-          UserAgent, CorrelationId;
-
-// 2) Summary: first/last + counts for this user/IP
-let userIpFirstLast =
-base
-| where UserPrincipalName =~ userUpn
-| where IPAddress == suspiciousIP
-| summarize FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated),
-            Attempts=count(),
-            Successes=countif(ResultType == 0),
-            Failures=countif(ResultType != 0);
-
-// 3) Context: is this IP hitting many users?
-let ipAcrossUsers =
-base
-| where IPAddress == suspiciousIP
-| summarize Users=dcount(UserPrincipalName),
-            Total=count(),
-            Successes=countif(ResultType == 0),
-            Failures=countif(ResultType != 0),
-            SampleUsers=make_set(UserPrincipalName, 25);
-
-// 4) Pivot: show all sign-ins for this user around each user+IP event time
-let userAround =
-base
-| where UserPrincipalName =~ userUpn
-| join kind=inner (
-    userIpEvents
-    | project EventTime=TimeGenerated, UserPrincipalName
-) on UserPrincipalName
-| where TimeGenerated between (EventTime - pivotWindow .. EventTime + pivotWindow)
-| project TimeGenerated, EventTime, UserPrincipalName,
-          AppDisplayName, IPAddress, Country, State, City,
-          ClientAppUsed, ConditionalAccessStatus, ResultType, ResultDescription,
-          DeviceName, DeviceId, JoinState, TrustType, IsCompliant, IsManaged,
-          UserAgent, CorrelationId;
-
-// ========= Output (Sections) =========
-union
-(
-    userIpFirstLast
-    | extend Section="Summary: User+IP", UserPrincipalName=userUpn, IPAddress=suspiciousIP
-    | project Section, TimeGenerated=LastSeen, UserPrincipalName, IPAddress,
-              Metric1=strcat("FirstSeen=", tostring(FirstSeen)),
-              Metric2=strcat("LastSeen=", tostring(LastSeen)),
-              Metric3=strcat("Attempts=", tostring(Attempts), " Successes=", tostring(Successes), " Failures=", tostring(Failures))
-),
-(
-    ipAcrossUsers
-    | extend Section="Summary: IP across users", IPAddress=suspiciousIP
-    | project Section, TimeGenerated=now(), UserPrincipalName="", IPAddress,
-              Metric1=strcat("Users=", tostring(Users)),
-              Metric2=strcat("Total=", tostring(Total), " Successes=", tostring(Successes), " Failures=", tostring(Failures)),
-              Metric3=strcat("SampleUsers=", tostring(SampleUsers))
-),
-(
-    userIpEvents
-    | extend Section="Events: User+IP"
-    | project Section, TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName,
-              ResultType, ResultDescription, ConditionalAccessStatus,
-              Country, State, City,
-              DeviceName, DeviceId, JoinState, TrustType, IsCompliant, IsManaged,
-              UserAgent, CorrelationId
-),
-(
-    userAround
-    | extend Section="Pivot: User around event"
-    | project Section, TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName,
-              ResultType, ResultDescription, ConditionalAccessStatus,
-              Country, State, City,
-              DeviceName, DeviceId, JoinState, TrustType, IsCompliant, IsManaged,
-              UserAgent, CorrelationId,
-              Metric1=strcat("EventTime=", tostring(EventTime))
-)
-| order by Section asc, TimeGenerated desc
-
-
-
+Sign in....
 
 
 Who in the tenant uses 8.8.8.8 (and how much)? (working)
@@ -326,32 +207,25 @@ perAccount
 
 URL From Email check: 
 
-let userUpn = "example@gmail.com";
-let urlNeedle = "google.com";
-let lookback = 7d;
+The "Simple" Trace Query 
+This query finds clicks on a specific suspicious URL and joins them with the corresponding email logs to show you who sent it and what the subject was.
 
 UrlClickEvents
-| where TimeGenerated > ago(lookback)
-| extend
-    UserUPN = tostring(coalesce(
-        column_ifexists("AccountUpn",""),
-        column_ifexists("UserPrincipalName",""),
-        column_ifexists("AccountName",""),
-        column_ifexists("UserId","")
-    )),
-    ClickUrl = tostring(column_ifexists("Url","")),
-    Action   = tostring(column_ifexists("ActionType","")),
-    // Email correlation fields (best-effort)
-    NetworkMessageId = tostring(column_ifexists("NetworkMessageId","")),
-    InternetMessageId = tostring(column_ifexists("InternetMessageId","")),
-    EmailSubject = tostring(column_ifexists("EmailSubject","")),
-    Sender = tostring(column_ifexists("SenderFromAddress",""))
-| where UserUPN =~ userUpn
-| where ClickUrl has urlNeedle
-// "Came from email" heuristic: some mail identifier is present
-| where isnotempty(NetworkMessageId) or isnotempty(InternetMessageId) or isnotempty(EmailSubject) or isnotempty(Sender)
-| project TimeGenerated, UserUPN, ClickUrl, Action, Sender, EmailSubject, NetworkMessageId, InternetMessageId
-| order by TimeGenerated desc
+| where Url has "suspicious-link.com" // Replace with the link you're investigating
+| join kind=inner (EmailEvents) on NetworkMessageId
+| project ClickTime=Timestamp, SenderFromAddress, Subject, RecipientEmailAddress, Url, ActionType
+
+
+
+Variety: Find the Email via the Recipient 
+If you don't have the exact URL but you know which user clicked something suspicious, you can search by their email address:
+
+UrlClickEvents
+| where AccountUpn =~ "user@yourdomain.com"
+| where Timestamp > ago(24h)
+| join kind=inner (EmailEvents) on NetworkMessageId
+| project Timestamp, SenderFromAddress, Subject, Url, ActionType
+| sort by Timestamp desc
 
 
 
