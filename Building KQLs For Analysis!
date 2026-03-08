@@ -485,3 +485,11 @@ DeviceLogonEvents
 | project ExecutionTime, AccountName, DeviceId, ProcessCommandLine
 
 
+Who is doing user/app changes (last 24h)
+AuditLogs
+| where TimeGenerated > ago(24h)
+| where Category in ("UserManagement","ApplicationManagement","GroupManagement","DirectoryManagement")
+| extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+                             tostring(InitiatedBy.app.displayName))
+| summarize Count=count() by Category, OperationName, Initiator
+| sort by Count desc
