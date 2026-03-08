@@ -489,7 +489,18 @@ Who is doing user/app changes (last 24h)
 AuditLogs
 | where TimeGenerated > ago(24h)
 | where Category in ("UserManagement","ApplicationManagement","GroupManagement","DirectoryManagement")
-| extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName),
-                             tostring(InitiatedBy.app.displayName))
-| summarize Count=count() by Category, OperationName, Initiator
+| extend Initiator = coalesce(
+    tostring(InitiatedBy.user.userPrincipalName),
+    tostring(InitiatedBy.app.displayName),
+    "Unknown"
+)
+| extend Target0 = iff(array_length(TargetResources) > 0, TargetResources[0], dynamic(null))
+| extend TargetDisplayName = coalesce(
+    tostring(Target0.displayName),
+    tostring(Target0.userPrincipalName),
+    tostring(Target0.id),
+    "UnknownTarget"
+)
+| extend TargetType = tostring(Target0.type)
+| summarize Count=count() by Category, OperationName, Initiator, TargetType, TargetDisplayName
 | sort by Count desc
