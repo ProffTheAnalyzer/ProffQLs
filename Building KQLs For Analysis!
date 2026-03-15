@@ -1,3 +1,5 @@
+The columns and tables may vary depending on client environmnent or lab environment. Adjust accordingly!
+
 Sign in....
 
 Impossible Travel: 
@@ -504,3 +506,14 @@ AuditLogs
 | extend TargetType = tostring(Target0.type)
 | summarize Count=count() by Category, OperationName, Initiator, TargetType, TargetDisplayName
 | sort by Count desc
+
+
+
+Processes Created by User/Admin
+let _adm_acount = "User";
+let _device = "ABC";
+DeviceProcessEvents
+| where Timestamp > ago(30d)
+| where DeviceName == _device
+| where InitiatingProcessAccountName =~ _adm_acount
+| summarize Count = count(), FirstExecuted = min(Timestamp), LastExecuted = max(Timestamp), CommandLines = make_set(ProcessCommandLine) by InitiatingProcessFileName
