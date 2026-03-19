@@ -1,0 +1,276 @@
+
+Common False Positives AND Clarifications!
+
+🔥 1) Common False Positives — Pass‑the‑Hash (PtH)
+PtH is noisy because NTLM is still used legitimately in many environments.
+
+✅ Common false positives:
+Legacy systems (old servers, old apps) that still use NTLM
+
+Print servers (NTLM authentication is extremely common)
+
+File shares accessed by many users
+
+VPN appliances that authenticate using NTLM
+
+Jump servers where many admins authenticate from the same host
+
+Backup servers that authenticate to many machines
+
+Monitoring tools (SolarWinds, SCCM, Lansweeper, etc.)
+
+Service accounts that authenticate across multiple hosts
+
+Why these cause false positives
+Because PtH detection relies on:
+
+NTLM - PtH uses NTLM challenge‑response
+LogonType 3 - Remote authentication (SMB, WMI, WinRM, PsExec) uses LogonType 3 (Lateral movement almost always uses LogonType 3)
+Multiple hosts or unusual hosts
+But many legitimate systems behave exactly like that.
+
+
+
+
+🔥 2) Common False Positives — Pass‑the‑Ticket (PtT)
+PtT is trickier because Kerberos is everywhere.
+
+Common false positives:
+Load balancers (multiple hosts using the same service account)
+
+Clustered servers (failover nodes share tickets)
+
+Citrix / RDS farms (same user logs in from many hosts)
+
+Service accounts running on multiple servers
+
+Kerberos delegation scenarios
+
+Kerberos renewals that look like reused tickets
+
+Misconfigured SPNs causing weird ticket behavior
+
+Why these cause false positives
+Because PtT detection often looks for:
+
+Same ticket used from multiple hosts
+
+Kerberos logons without AS‑REQ
+
+LogonType 9 (NewCredentials)
+
+But legitimate enterprise systems do this all the time.
+
+
+
+🔥 3) For PtT — does it have to be different IPs? No.
+
+A Pass‑the‑Ticket attack can absolutely happen from one IP.
+
+Why?
+Because the attacker may:
+
+Already be on the compromised host
+
+Inject the stolen ticket into LSASS on the same machine
+
+Use the forged ticket locally to escalate privileges
+
+When PtT does involve multiple IPs:
+When the attacker steals a ticket from Host A
+
+And reuses it on Host B
+
+That’s the classic detection pattern.
+
+But single‑host PtT is still valid:
+Especially when the attacker is escalating locally
+
+Or pivoting to domain admin on the same machine
+
+So yes — one IP can still be an attack.
+
+
+🔥 4) DCSync — how can a non‑DC account perform DC operations?
+This is one of the most misunderstood attacks.
+
+A non‑DC account can perform DCSync if it has these rights:
+Replicating Directory Changes
+
+Replicating Directory Changes All
+
+Replicating Directory Changes In Filtered Set
+
+
+These rights allow the account to request:
+
+Password hashes
+
+Kerberos keys
+
+NTLM hashes
+
+All AD secrets
+
+
+How attackers get these rights:
+
+Compromise a domain admin
+
+Compromise an account with delegated replication rights
+
+Modify ACLs on the domain root
+
+Abuse misconfigurations (common in old AD environments)
+
+
+
+Why it works
+DCSync uses the Directory Replication Service Remote Protocol (DRSR).
+Any account with replication rights can impersonate a DC.
+
+This is by design — not a bug.
+
+
+🔥 5) Why do we exclude machine accounts?
+Machine accounts end with $.
+
+Reasons to exclude them:
+1) They authenticate constantly
+Servers and workstations authenticate:
+
+To DCs
+To each other
+To services
+To file shares
+
+This creates massive noise.
+
+2) Machine accounts use NTLM and Kerberos frequently
+This would drown your detections in false positives.
+
+3) Machine accounts often have legitimate replication rights
+Especially:
+
+Exchange servers
+ADFS servers
+SCCM servers
+Domain controllers
+
+
+
+4) Attackers rarely use machine accounts for credential theft
+They want user accounts, especially privileged ones.
+
+So excluding machine accounts is a noise‑reduction strategy, not a security assumption.
+
+
+
+How can a non‑DC account legitimately have DCSync rights?
+This is one of the most misunderstood parts of AD security.
+
+These rights are not exclusive to domain controllers.
+Any account can be granted:
+
+Replicating Directory Changes
+Replicating Directory Changes All
+Replicating Directory Changes In Filtered Set
+
+
+Who legitimately gets these rights?
+✔ Exchange servers
+Exchange needs to read directory data, including password hashes for mailbox migrations.
+
+✔ ADFS servers
+They need replication rights for token signing and validation.
+
+✔ SCCM / MECM servers
+They often get replication rights for user discovery.
+
+✔ Backup solutions
+Veeam, Commvault, Rubrik — many require replication rights.
+
+✔ Identity sync tools
+Azure AD Connect (ADSync) has these rights by design.
+
+✔ Misconfigurations
+Admins sometimes accidentally grant these rights to:
+
+Helpdesk groups
+Service accounts
+Application accounts
+Custom admin roles
+
+
+So yes — user accounts, service accounts, and admin accounts can all have replication rights.
+And attackers love this because:
+
+They don’t need domain admin
+They just need an account with replication rights
+Then they can DCSync and dump the entire domain
+
+
+
+🔥 3) Why don’t attackers use machine accounts? They can be privileged too, right?
+Machine accounts can be privileged — but attackers avoid them for several reasons:
+
+1) Machine accounts rotate passwords automatically
+Every 30 days by default.
+
+This makes persistence harder.
+
+2) Machine accounts authenticate constantly
+They generate:
+Kerberos
+NTLM
+LDAP
+SMB
+RPC
+
+This creates massive noise and makes attacker activity harder to hide.
+
+3) Machine accounts rarely have interactive logons
+Attackers want:
+
+RDP
+PowerShell
+WMI
+WinRM
+SMB lateral movement
+
+Machine accounts don’t support these well.
+
+
+4) Machine accounts rarely have replication rights
+Except:
+
+Domain controllers
+Exchange servers
+ADFS servers
+
+
+5) User accounts give attackers more flexibility
+They can escalate
+
+They can blend in
+They can move laterally
+They can access cloud resources
+Machine accounts are limited.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
