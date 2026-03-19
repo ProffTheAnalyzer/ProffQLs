@@ -1,6 +1,7 @@
 The columns and tables may vary depending on client or lab environment. Adjust accordingly!
 These are working progress of mine, I am going to eventually clean them up and group them by for example (Phishing/Emails, Sign-in Events.....)
 
+
 Sign in....
 
 Impossible Travel: 
@@ -128,51 +129,6 @@ SigninLogs
 
 
 
-Cloud password spray from a specific IP — SigninLogs
-This shows the spray pattern from 8.8.8.8: many users, low tries per user, lots of failures (and any successes).
-
-let sprayIP = "8.8.8.8";
-let lookback = 24h;
-let binSize = 15m;
-
-// Tune
-let minAccounts = 10;
-let maxPerAccount = 3;
-let minTotalFails = 20;
-
-let perAccount =
-SigninLogs
-| where TimeGenerated > ago(lookback)
-| where isnotempty(UserPrincipalName) and isnotempty(IPAddress)
-| where IPAddress == sprayIP
-| summarize Attempts=count(),
-            Fails=countif(ResultType != 0),
-            Success=countif(ResultType == 0),
-            Apps=make_set(AppDisplayName, 5),
-            Clients=make_set(ClientAppUsed, 5),
-            ResultDescs=make_set(ResultDescription, 5),
-            FirstSeen=min(TimeGenerated),
-            LastSeen=max(TimeGenerated)
-  by bin(TimeGenerated, binSize), IPAddress, UserPrincipalName;
-
-perAccount
-| where Fails > 0
-| where Attempts between (1 .. maxPerAccount)
-| summarize
-    AccountsTargeted=dcount(UserPrincipalName),
-    TotalFails=sum(Fails),
-    TotalSuccess=sum(Success),
-    SampleAccounts=make_set(UserPrincipalName, 25),
-    SampleApps=make_set(tostring(Apps), 10),
-    SampleClients=make_set(tostring(Clients), 10),
-    SampleFailReasons=make_set(tostring(ResultDescs), 10),
-    FirstSeen=min(FirstSeen),
-    LastSeen=max(LastSeen)
-  by TimeGenerated, IPAddress
-| where AccountsTargeted >= minAccounts and TotalFails >= minTotalFails
-| order by AccountsTargeted desc, TotalFails desc, TimeGenerated desc
-
-
 URL From Email check: 
 The "Simple" Trace Query 
 This query finds clicks on a specific suspicious URL and joins them with the corresponding email logs to show you who sent it and what the subject was.
@@ -213,6 +169,23 @@ SecurityEvent
 | where Status == "0x0" // Success only
 | project TimeGenerated, Computer, TargetUserName, ServiceName, TicketEncryption, IpAddress
 
+SecurityEvent
+| where EventID == 4624
+| where LogonType == 9  // NewCredentials
+| where AuthenticationPackageName =~ "Kerberos"
+| extend
+    Account = tostring(TargetUserName),
+    ClientIP = tostring(IpAddress),
+    Workstation = tostring(WorkstationName)
+| summarize
+    Count = count(),
+    Hosts = make_set(Workstation),
+    IPs = make_set(ClientIP),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by Account
+| where array_length(Hosts) > 1 or array_length(IPs) > 1
+| order by Count desc
 
 
 KQL: Correlating Logons with Processes (PTH)
@@ -229,6 +202,132 @@ SecurityEvent
 | where NewProcessName !endswith "\\lsass.exe" // Typical FP
 | where NewProcessName !endswith "\\VeeamGuestHelper.exe" // Example Backup FP
 | project LogonTime, Computer, Account, IpAddress, NewProcessName, ParentProcessName
+
+
+Golden Ticket Detection: 
+SecurityEvent
+| where EventID == 4624
+| where AuthenticationPackageName =~ "Kerberos"
+| extend
+    Account = tostring(TargetUserName),
+    LogonType = tostring(LogonType),
+    TicketInfo = tostring(TransmittedServices)
+| where TicketInfo has "krbtgt"  // suspicious
+| where Account !endswith "$"
+| summarize
+    Count = count(),
+    Hosts = make_set(WorkstationName),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by Account
+| where Count > 3 or array_length(Hosts) > 1
+
+
+
+🟦 KQL — Silver Ticket Detection
+SecurityEvent
+| where EventID == 4624
+| where AuthenticationPackageName =~ "Kerberos"
+| where LogonType == 3  // network
+| extend
+    Account = tostring(TargetUserName),
+    Service = tostring(TransmittedServices),
+    ClientIP = tostring(IpAddress)
+| where Service has_any ("cifs", "host", "wsman", "mssqlsvc")
+| summarize
+    Count = count(),
+    IPs = make_set(ClientIP),
+    Hosts = make_set(WorkstationName),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by Account, Service
+| where array_length(IP
+
+
+
+
+🟦 KQL — Skeleton Key Detection
+SecurityEvent
+| where EventID == 4624
+| where LogonType == 3
+| where AuthenticationPackageName =~ "NTLM"
+| where TargetUserName !endswith "$"
+| summarize
+    Count = count(),
+    Accounts = make_set(TargetUserName),
+    IPs = make_set(IpAddress),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by WorkstationName
+| where array_length(Accounts) > 5  // many accounts suddenly authenticating
+| order by Count desc
+
+
+🟦 KQL — DCSync Detection
+SecurityEvent
+| where EventID == 4662
+| where ObjectType has_any (
+    "DS-Replication-Get-Changes",
+    "DS-Replication-Get-Changes-All",
+    "DS-Replication-Get-Changes-In-Filtered-Set"
+)
+| extend
+    Account = tostring(SubjectUserName),
+    ClientIP = tostring(IpAddress)
+| where Account !endswith "$"  // exclude DC machine accounts
+| summarize
+    Count = count(),
+    IPs = make_set(ClientIP),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by Account
+| order by Count desc
+
+
+🟧 DCSHADOW ATTACK
+SecurityEvent
+| where EventID in (5137, 5141, 4742)
+| extend
+    Account = tostring(SubjectUserName),
+    Target = tostring(TargetUserName),
+    ClientIP = tostring(IpAddress)
+| where Account !endswith "$"  // exclude DC machine accounts
+| summarize
+    Count = count(),
+    Events = make_set(EventID),
+    IPs = make_set(ClientIP),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by Account, Target
+| order by Count desc
+
+
+LATERAL MOVEMENT (WMI, WinRM, PsExec, Remote Services)
+SecurityEvent
+| where EventID == 4688
+| where ProcessName has_any ("wmic.exe", "wmiprvse.exe")
+| project TimeGenerated, SubjectUserName, ProcessName, CommandLine, WorkstationName
+
+SecurityEvent
+| where EventID == 4624
+| where LogonType == 3
+| where AuthenticationPackageName =~ "NTLM"
+| where IpAddress != "-" and IpAddress != "::1"
+| project TimeGenerated, TargetUserName, IpAddress, WorkstationName
+
+SecurityEvent
+| where EventID == 7045
+| where ServiceName =~ "psexesvc"
+| project TimeGenerated, ServiceName, ServiceFileName, AccountName, WorkstationName
+
+
+SecurityEvent
+| where EventID == 7045
+| where ServiceFileName has_any ("sc.exe", "services.exe")
+| project TimeGenerated, ServiceName, ServiceFileName, AccountName, WorkstationName
+
+
+
 
 
 Impossible Travel: 
