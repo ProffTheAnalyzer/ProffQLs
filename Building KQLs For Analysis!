@@ -1,4 +1,5 @@
-The columns and tables may vary depending on client environmnent or lab environment. Adjust accordingly!
+The columns and tables may vary depending on client or lab environment. Adjust accordingly!
+These are working progress of mine, I am going to eventually clean them up and group them by for example (Phishing/Emails, Sign-in Events.....)
 
 Sign in....
 
@@ -172,60 +173,7 @@ perAccount
 | order by AccountsTargeted desc, TotalFails desc, TimeGenerated desc
 
 
-
-On-prem style password spray from a specific IP — IdentityLogonEvents
-This detects the same pattern from 8.8.8.8, and includes failure reasons like wrong password/locked.
-
-let sprayIP = "8.8.8.8";
-let lookback = 24h;
-let binSize = 15m;
-
-// Tune
-let minAccounts = 10;
-let maxPerAccount = 3;
-let minTotalFails = 20;
-let excludeComputerAccounts = true;
-
-let perAccount =
-IdentityLogonEvents
-| where TimeGenerated > ago(lookback)
-| extend Account=tostring(AccountName),
-         SrcIP=tostring(IPAddress),
-         SrcDevice=tostring(DeviceName),
-         Reason=tostring(FailureReason),
-         Proto=tostring(Protocol),
-         Action=tostring(ActionType)
-| where SrcIP == sprayIP
-| where isnotempty(Account)
-| where excludeComputerAccounts == false or Account !endswith "$"
-| summarize Attempts=count(),
-            Fails=countif(Action has "Fail" or Reason has_any ("wrong","bad","invalid","locked")),
-            Success=countif(Action has "Success"),
-            Reasons=make_set(Reason, 5),
-            Protocols=make_set(Proto, 5),
-            FirstSeen=min(TimeGenerated),
-            LastSeen=max(TimeGenerated)
-  by bin(TimeGenerated, binSize), SrcIP, SrcDevice, Account;
-
-perAccount
-| where Fails > 0
-| where Attempts between (1 .. maxPerAccount)
-| summarize
-    AccountsTargeted=dcount(Account),
-    TotalFails=sum(Fails),
-    TotalSuccess=sum(Success),
-    SampleAccounts=make_set(Account, 25),
-    SampleReasons=make_set(tostring(Reasons), 10),
-    SampleProtocols=make_set(tostring(Protocols), 10),
-    FirstSeen=min(FirstSeen),
-    LastSeen=max(LastSeen)
-  by TimeGenerated, SrcIP, SrcDevice
-| where AccountsTargeted >= minAccounts and TotalFails >= minTotalFails
-| order by AccountsTargeted desc, TotalFails desc, TimeGenerated desc
-
-
 URL From Email check: 
-
 The "Simple" Trace Query 
 This query finds clicks on a specific suspicious URL and joins them with the corresponding email logs to show you who sent it and what the subject was.
 
@@ -233,7 +181,6 @@ UrlClickEvents
 | where Url has "suspicious-link.com" // Replace with the link you're investigating
 | join kind=inner (EmailEvents) on NetworkMessageId
 | project ClickTime=Timestamp, SenderFromAddress, Subject, RecipientEmailAddress, Url, ActionType
-
 
 
 Variety: Find the Email via the Recipient 
@@ -245,8 +192,6 @@ UrlClickEvents
 | join kind=inner (EmailEvents) on NetworkMessageId
 | project Timestamp, SenderFromAddress, Subject, Url, ActionType
 | sort by Timestamp desc
-
-
 
 
 KQL Hunting Query: Potential Pass-the-Hash (PtH), searches for logon type 9 (new credentials). which is the primary inidcator of a PtH attempt using tools like mimikatz, where a local process impersonates a remote user.
