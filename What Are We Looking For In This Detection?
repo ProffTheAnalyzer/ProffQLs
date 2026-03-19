@@ -1,4 +1,39 @@
+PASS‑THE‑TICKET (PtT)
+Attackers steal a Kerberos TGT or TGS and reuse it on another machine.
+
+🔍 What you look for
+LogonType 9 (NewCredentials)
+Kerberos logons without a corresponding AS‑REQ/TGS‑REQ
+Ticket used from a different host than where it was issued
+Sudden elevation (4672) after Kerberos logon
+Multiple Kerberos logons with the same ticket from different IPs
+
+The following detection strategies can help you detect this type of attack:
+
+Anomaly detection. Monitor for unusual access patterns or activities during odd hours. Such patterns might indicate malicious intent.
+Monitor authentication events. Audit all Kerberos authentication events and review them for discrepancies. Perform this auditing on both endpoints and domain controllers.
+Ticket lifespan. Track the age of tickets and set alerts for tickets that are used beyond their set lifespan.
+Monitoring tools. Use advanced threat detection solutions that can recognize Pass the Ticket attack patterns. Also watch for use of tools like Mimikatz, Kekeo, Rubeus, and Creddump7.
+
+📘 Logs
+SecurityEvent (4624, 4672)
+Microsoft‑Windows‑Kerberos/Operational (if forwarded)
+
+
 Detecting Pass-the-Hash attacks:
+
+ What a Pass‑the‑Hash attack actually looks like
+Pass‑the‑Hash is when an attacker:
+
+Steals an NTLM hash from a compromised machine
+Uses the hash directly to authenticate
+Without ever knowing the password
+This means the attacker authenticates successfully, but:
+From a host the user never logs in from
+With no Kerberos ticket
+Using NTLM instead of Kerberos
+Often immediately followed by lateral movement (Admin$ access, remote service creation, etc.)
+So the detection is all about behavior, not a single event.
 
 After a Pass-the-Hash attack has been executed, several Windows Security events can help identify the activity. Here are some key events to look for:
 
@@ -10,38 +45,97 @@ Event ID 4672: This event logs special privileges assigned to a new logon, often
 Missing password logon: Search for Event ID 4624 where an NTLM authentication occurs without a preceding Event ID 4624 entry indicating a password-based logon using the same account. This suggests that the NTLM authentication might have been performed using stolen credentials.
 Correlating events: Use the Logon ID hexadecimal value, found in Event IDs 4624 and 4648, to correlate events associated with the same login session. This will provide a complete picture of the user’s activities, including interactive logons, service starts, and privilege changes.
 
-Excessive host access
-Unusual host access
-NTLM authentication not preceded by a password authentication - Legitimate connections typically have an interactive logon before an NTLM connection, except the Service Accounts. 
-Correlating events: Use the Logon ID hexadecimal value, found in Event IDs 4624 and 4648, to correlate events associated with the same login session
 
 https://www.nccgroup.com/research-blog/defending-your-directory-an-expert-guide-to-mitigating-pass-the-hash-attacks-in-active-directory/
 
 
 
-Defending Your Directory: Securing Active Directory Against DCSync Attacks: 
-Detecting DCSync attacks is challenging because they leverage legitimate AD replication functionality. However, there are some key indicators that can help in identifying suspicious activity:
+GOLDEN TICKET
+Attackers forge a TGT using the KRBTGT account hash.
 
-Windows Security Log Event ID 4662: An operation was performed on an object.
+🔍 What you look for
+Kerberos logons with impossible lifetimes (10 years, etc.)
+Logons for accounts that don’t exist
+Kerberos tickets issued without a corresponding AS‑REQ
+4672 (privileged logon) from unusual hosts
+TGTs with very long validity periods
 
-In the Windows Security logs (C:\Windows\System32\winevt\Logs\ Security.evtx), this event indicates a request for directory replication. Specifically, watch for access rights to the following GUIDs:
-
-{1131f6aa-9c07–11d1-f79f-00c04fc2dcd2} — DS-Replication-Get-Changes
-{1131f6ad-9c07–11d1-f79f-00c04fc2dcd2} — DS-Replication-Get-Changes-All
-{89e95b76–444d-4c62–991a-0facbeda640c} — DS-Replication-Get-Changes-In-Filtered-Set extended right
-The before mentioned strings can be found on the properties of the event 4662.
+📘 Logs
+SecurityEvent (4624, 4672)
+Kerberos Operational logs (if collected)
 
 
+SILVER TICKET
+Attackers forge a service ticket (TGS) using a service account hash.
 
-How can you detect a Pass the Ticket attack?: 
-Detection of a Pass the Ticket attack can be difficult. The legitimate appearance of ticket-based activities complicates the task.
+🔍 What you look for
+Kerberos service logons without TGT requests
+Authentication to a service (CIFS, HOST, MSSQLSvc) from unusual hosts
+No corresponding 4768/4769 events
+Sudden admin access to SMB or WinRM
 
-The following detection strategies can help you detect this type of attack:
+📘 Logs
+SecurityEvent (4624)
+4769 (if domain controller logs are ingested)
 
-Anomaly detection. Monitor for unusual access patterns or activities during odd hours. Such patterns might indicate malicious intent.
-Monitor authentication events. Audit all Kerberos authentication events and review them for discrepancies. Perform this auditing on both endpoints and domain controllers.
-Ticket lifespan. Track the age of tickets and set alerts for tickets that are used beyond their set lifespan.
-Monitoring tools. Use advanced threat detection solutions that can recognize Pass the Ticket attack patterns. Also watch for use of tools like Mimikatz, Kekeo, Rubeus, and Creddump7.
+SKELETON KEY ATTACK
+A Skeleton Key attack patches LSASS on a domain controller so that any user can authenticate with a master password.
+
+🧠 What it looks like
+Skeleton Key breaks Kerberos, so attackers fall back to NTLM.
+
+High‑signal indicators:
+Sudden spike in NTLM LogonType 3 authentications
+Many different accounts logging in from the same host
+Successful logons for accounts that normally never authenticate on that machine
+LSASS access events (Sysmon Event ID 10)
+No corresponding Kerberos activity
+
+📘 Logs to monitor
+SecurityEvent (4624, 4625)
+Sysmon (Event ID 10 – LSASS access)
+
+
+DCSYNC ATTACK
+DCSync is when an attacker impersonates a domain controller and requests password hashes from AD.
+
+🧠 What it looks like
+Non‑DC accounts performing replication operations
+
+Event ID 4662 with specific GUIDs
+
+Access to:
+
+DS-Replication-Get-Changes
+DS-Replication-Get-Changes-All
+DS-Replication-Get-Changes-In-Filtered-Set
+
+📘 Logs to monitor
+SecurityEvent (4662, 4672)
+
+DCSHADOW ATTACK
+DCShadow registers a rogue domain controller and pushes unauthorized directory changes.
+
+🧠 What it looks like
+Object creation/deletion events (5137, 5141)
+
+Computer account changes (4742)
+
+Modifications to:
+msDS-AllowedToActOnBehalfOfOtherIdentity
+servicePrincipalName
+Replication events from non‑DC hosts
+
+📘 Logs to monitor
+SecurityEvent (5137, 5141, 4742)
+
+
+LATERAL MOVEMENT (WMI, WinRM, PsExec, Remote Services)
+Indicators:
+wmic.exe execution
+Remote process creation
+Powershell WMI calls (Get-WmiObject, Invoke-WmiMethod)
+
 
 
 Useful EventIDs | Authentication & account abuse (Security log)
@@ -56,6 +150,7 @@ These are your bread-and-butter for brute force, spray, suspicious logons, later
 4769 — Kerberos service ticket requested (TGS; lateral movement + service access)
 4771 — Kerberos pre-auth failed (bad password / time skew / spray hints)
 4778 / 4779 — RDP session reconnect/disconnect (RDP investigations)
+
 
 LogonType quick hints (4624/4625):
 2 = interactive console
@@ -91,6 +186,7 @@ AD / Domain Controller “must-know” (Security log on DCs)
 4719 — Audit policy changed (defense evasion / attacker tampering)
 1102 — Security log cleared (big red flag)
 4616 — System time changed (Kerberos weirdness / evasion)
+
 Lateral movement & remote execution
 5140 — Network share accessed (SMB activity; use with source IP and share name)
 5145 — Detailed file share access (if enabled; extremely useful but noisy)
@@ -126,10 +222,6 @@ If you’re building a fast cheat-sheet:
 4624, 4625, 4688, 4697/7045, 4720, 4724, 4728/4732, 4740, 4768, 4769, 4776, 1102
 
 Named Pipe EventID: 17, 18
-
-
-
-
 
 
 
